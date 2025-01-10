@@ -254,7 +254,7 @@ class EditController extends \GraphQLServices\GraphQLServiceController {
 															$criteria = [$m => $b['value']];
 															if(!$ignore_parent && ($insert_mode === 'HIERARCHICAL') && $last_id) { $criteria['parent_id'] = $last_id; }
 															if($instance = $table::findAsInstance($criteria)) {
-																$info[] = Error\info($b['value'], 'MATCH', _t('Record found for match on (%1) with values(%2)', $m, $b['value']), 'GENERAL');
+																$info[] = Error\info($b['value'], 'MATCH', _t('Record found for match on (%1) with values (%2)', $m, $b['value']), 'GENERAL');
 																break(2);
 															}
 														}
