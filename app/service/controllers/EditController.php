@@ -124,7 +124,7 @@ class EditController extends \GraphQLServices\GraphQLServiceController {
 							'name' => 'matchOn',
 							'type' => Type::listOf(Type::string()),
 							'default' => ['idno'],
-							'description' => _t('List of fields to test for existance of record. Values can be "idno" or "preferred_labels".')
+							'description' => _t('List of fields to test for existence of record. Values can be "idno" or "preferred_labels".')
 						],
 						[
 							'name' => 'existingRecordPolicy',
