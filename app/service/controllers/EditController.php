@@ -153,7 +153,7 @@ class EditController extends \GraphQLServices\GraphQLServiceController {
 							'name' => 'list',
 							'type' => Type::string(),
 							'default' => false,
-							'description' => _t('List to add records to (when inserting list items.')
+							'description' => _t('List to add records to when inserting list items.')
 						],
 					],
 					'resolve' => function ($rootValue, $args) {
