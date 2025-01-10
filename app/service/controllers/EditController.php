@@ -130,7 +130,7 @@ class EditController extends \GraphQLServices\GraphQLServiceController {
 							'name' => 'existingRecordPolicy',
 							'type' => Type::string(),
 							'default' => 'SKIP',
-							'description' => _t('Policy if record with same identifier already exists. Values are: IGNORE (ignore existing records, REPLACE (delete existing and create new), MERGE (execute as edit), SKIP (do not perform add).')
+							'description' => _t('Policy if record with same identifier already exists. Values are: IGNORE (ignore existing records), REPLACE (delete existing and create new), MERGE (execute as edit), SKIP (do not perform add).')
 						],
 						[
 							'name' => 'ignoreType',
