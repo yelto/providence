@@ -7,7 +7,7 @@
  * ----------------------------------------------------------------------
  *
  * Software by Whirl-i-Gig (http://www.whirl-i-gig.com)
- * Copyright 2011-2025 Whirl-i-Gig
+ * Copyright 2011-2026 Whirl-i-Gig
  *
  * For more information visit http://www.CollectiveAccess.org
  *
@@ -639,9 +639,11 @@ class Installer {
 			}
 
 
-			if($list["deleted"] && $t_list->getPrimaryKey()) {
-				$this->logStatus(_t('Deleting list %1', $list_code));
-				$t_list->delete(true);
+			if($list["deleted"]) {
+				if($t_list->getPrimaryKey()) {
+					$this->logStatus(_t('Deleting list %1', $list_code));
+					$t_list->delete(true);
+				}
 				continue;
 			}
 
@@ -843,9 +845,11 @@ class Installer {
 			$this->logStatus(_t('Metadata element with code %1 is new', $element_code));
 		}
 
-		if($element['deleted'] && $t_md_element->getPrimaryKey()) {
-			$this->logStatus(_t('Deleting metadata element with code %1', $element_code));
-			$t_md_element->delete(true, ['hard' => false]);
+		if($element['deleted']) {
+			if($t_md_element->getPrimaryKey()) {
+				$this->logStatus(_t('Deleting metadata element with code %1', $element_code));
+				$t_md_element->delete(true, ['hard' => false]);
+			}
 			return false; // we don't want the postprocessing to kick in. our work here is done.
 		}
 
@@ -1025,9 +1029,11 @@ class Installer {
 				$this->logStatus(_t('User interface with code %1 already exists', $ui_code));
 			}
 
-			if($ui['deleted'] && $t_ui->getPrimaryKey()) {
-				$this->logStatus(_t('Deleting user interface with code %1', $ui_code));
-				$t_ui->delete(true, ['hard' => true]);
+			if($ui['deleted']) {
+				if($t_ui->getPrimaryKey()) {
+					$this->logStatus(_t('Deleting user interface with code %1', $ui_code));
+					$t_ui->delete(true, ['hard' => true]);
+				}
 				continue;
 			}
 
@@ -1111,9 +1117,11 @@ class Installer {
 					$this->logStatus(_t('Screen with code %1 for user interface with code %2 is new', $screen_idno, $ui_code));
 				}
 
-				if($screen['deleted'] && $t_ui_screens->getPrimaryKey()) {
-					$this->logStatus(_t('Deleting screen with code %1 for user interface with code %2', $screen_idno, $ui_code));
-					$t_ui_screens->delete(true, ['hard' => true]);
+				if($screen['deleted']) {
+					if($t_ui_screens->getPrimaryKey()) {
+						$this->logStatus(_t('Deleting screen with code %1 for user interface with code %2', $screen_idno, $ui_code));
+						$t_ui_screens->delete(true, ['hard' => true]);
+					}
 					continue;
 				}
 
@@ -1425,8 +1433,6 @@ class Installer {
 			// create relationship type root if necessary
 			$t_rel_type->set('parent_id', null);
 			$t_rel_type->set('type_code', $root_type_code);
-			$t_rel_type->set('sub_type_left_id', null);
-			$t_rel_type->set('sub_type_right_id', null);
 			$t_rel_type->set('table_num', $table_num);
 			$t_rel_type->set('rank', 10);
 			$t_rel_type->set('is_default', 0);
@@ -1478,9 +1484,11 @@ class Installer {
 				$this->logStatus(_t('Relationship type with code %1 is new', $type_code));
 			}
 
-			if($type["deleted"] && $t_rel_type->getPrimaryKey()) {
-				$this->logStatus(_t('Deleting relationship type with code %1', $type_code));
-				$t_rel_type->delete(true);
+			if($type["deleted"]) {
+				if($t_rel_type->getPrimaryKey()) {
+					$this->logStatus(_t('Deleting relationship type with code %1', $type_code));
+					$t_rel_type->delete(true);
+				}
 				continue;
 			}
 
@@ -1500,42 +1508,33 @@ class Installer {
 			} else {
 				$t_rel_type->insert();
 			}
-
-			// As of February 2017 "typeRestrictionLeft" is preferred over "subTypeLeft"
-			if(
-				($left_subtype_code = ($type["typeRestrictionLeft"] ?? null))
-			) {
-				$t_obj = \Datamodel::getInstance($left_table);
-				$list_code = $t_obj->getFieldListCode($t_obj->getTypeFieldName());
-
-				$this->logStatus(_t('Adding left type restriction %1 for relationship type with code %2', $left_subtype_code, $type_code));
-				if (isset($list_item_ids[$list_code][$left_subtype_code])) {
-					$t_rel_type->set('sub_type_left_id', $list_item_ids[$list_code][$left_subtype_code]);
-					if(
-						($include_subtypes = $type["includeSubtypesLeft"])
-					) {
-						$t_rel_type->set('include_subtypes_left', (bool)$include_subtypes ? 1 : 0);
-					}
-					$t_rel_type->update();
-				}
-			}
 			
-			if(
-				($right_subtype_code = ($type["typeRestrictionRight"] ?? null))
-			) {
-				$t_obj = \Datamodel::getInstance($right_table);
-				$list_code = $t_obj->getFieldListCode($t_obj->getTypeFieldName());
-
-				$this->logStatus(_t('Adding right type restriction %1 for relationship type with code %2', $right_subtype_code, $type_code));
-				if (isset($list_item_ids[$list_code][$right_subtype_code])) {
-					$t_rel_type->set('sub_type_right_id', $list_item_ids[$list_code][$right_subtype_code]);
-					
-					if(
-						($include_subtypes = $type["includeSubtypesRight"])
-					) {
-						$t_rel_type->set('include_subtypes_right', (bool)$include_subtypes ? 1 : 0);
+			if(is_array($type['typeRestrictions'] ?? null)) {
+				$t_left = \Datamodel::getInstance($left_table);
+				$t_right = \Datamodel::getInstance($right_table);
+				foreach($type['typeRestrictions'] as $r) {
+					if(strlen($r['sub_type_left_id'])) {
+						$r['sub_type_left_id'] = $t_left->getTypeIDForCode($r['sub_type_left_id']);
+					} else {
+						$r['sub_type_left_id'] = null;
 					}
-					$t_rel_type->update();
+					if(strlen($r['sub_type_right_id'])) {
+						$r['sub_type_right_id'] = $t_right->getTypeIDForCode($r['sub_type_right_id']);
+					} else {
+						$r['sub_type_right_id'] = null;
+					}
+					if(!$r['sub_type_left_id'] && !$r['sub_type_right_id']) { 
+						$this->logStatus(_t('Skipping relationship type restriction for table %1 and code %2 because the related type codes were invalid', $table_num, $type_code));
+						continue;
+					}
+					if(!$t_rel_type->addTypeRestriction($r['sub_type_left_id'], $r['sub_type_right_id'], [
+						'include_subtypes_left' => $r['include_subtypes_left'],
+						'include_subtypes_right' => $r['include_subtypes_right']
+					])) {
+						$this->logStatus(_t('Skipping relationship type restriction for table %1 and code %2 because the restriction could not be written', $table_num, $type_code));
+					} else {
+						$this->logStatus(_t('Added relationship type restriction for table %1 and code %2 for left type %3 and right type %4', $table_num, $type_code, $r['sub_type_left_id'], $r['sub_type_right_id']));
+					}
 				}
 			}
 
@@ -1570,9 +1569,11 @@ class Installer {
 				$this->logStatus(_t('User role with code %1 already exists', $role_code));
 			}
 
-			if($role["deleted"] && $t_role->getPrimaryKey()) {
-				$this->logStatus(_t('Deleting user role with code %1', $role_code));
-				$t_role->delete(true);
+			if($role["deleted"]) {
+				if($t_role->getPrimaryKey()) {
+					$this->logStatus(_t('Deleting user role with code %1', $role_code));
+					$t_role->delete(true);
+				}
 				continue;
 			}
 
@@ -1691,9 +1692,11 @@ class Installer {
 				$this->logStatus(_t('Display with code %1 already exists', $display_code));
 			}
 
-			if($display["deleted"] && $t_display->getPrimaryKey()) {
-				$t_display->delete(true);
-				$this->logStatus(_t('Deleting display with code %1', $display_code));
+			if($display["deleted"]) {
+				if($t_display->getPrimaryKey()) {
+					$t_display->delete(true);
+					$this->logStatus(_t('Deleting display with code %1', $display_code));
+				}
 				continue;
 			}
 
@@ -1881,9 +1884,11 @@ class Installer {
 				$this->logStatus(_t('Search form with code %1 already exists', $form_code));
 			}
 
-			if($form["deleted"] && $t_form->getPrimaryKey()) {
-				$this->logStatus(_t('Deleting search form with code %1', $form_code));
-				$t_form->delete(true);
+			if($form["deleted"]) {
+				if($t_form->getPrimaryKey()) {
+					$this->logStatus(_t('Deleting search form with code %1', $form_code));
+					$t_form->delete(true);
+				}
 				continue;
 			}
 
@@ -2068,8 +2073,10 @@ class Installer {
 					$t_group = new \ca_user_groups();
 				}
 
-				if($group["deleted"] && $t_group->getPrimaryKey()) {
-					$t_group->delete(true);
+				if($group["deleted"]) {
+					if($t_group->getPrimaryKey()) {
+						$t_group->delete(true);
+					}
 					continue;
 				}
 
@@ -2179,9 +2186,11 @@ class Installer {
 				$this->logStatus(_t('Metadata alert with code %1 already exists', $alert_code));
 			}
 
-			if($alert["deleted"] && $t_alert->getPrimaryKey()) {
-				$this->logStatus(_t('Deleting metadata alert with code %1', $alert_code));
-				$t_alert->delete(true);
+			if($alert["deleted"]) {
+				if($t_alert->getPrimaryKey()) {
+					$this->logStatus(_t('Deleting metadata alert with code %1', $alert_code));
+					$t_alert->delete(true);
+				}
 				continue;
 			}
 

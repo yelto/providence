@@ -7,7 +7,7 @@
  * ----------------------------------------------------------------------
  *
  * Software by Whirl-i-Gig (http://www.whirl-i-gig.com)
- * Copyright 2008-2025 Whirl-i-Gig
+ * Copyright 2008-2026 Whirl-i-Gig
  *
  * For more information visit http://www.CollectiveAccess.org
  *
@@ -248,7 +248,7 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 				if ((bool)$this->get('access_inherit_from_parent') && (($vn_parent_id = $this->get('parent_id')) > 0)) {
 					$t_parent = Datamodel::getInstanceByTableNum($this->tableNum(), false);
 					if ($t_parent->load($vn_parent_id)) {
-						$this->set('access', $t_parent->set('access'));
+						$this->set('access', $t_parent->get('access'));
 					}
 				}
 			}
@@ -278,9 +278,9 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 		// Set ACL for newly created record
 		if (caACLIsEnabled($this)) {
 			if($AUTH_CURRENT_USER_ID) { $this->setACLUsers([$AUTH_CURRENT_USER_ID => __CA_ACL_EDIT_DELETE_ACCESS__]); }
-			$this->setACLWorldAccess($this->getAppConfig()->get('default_item_access_level'));
+			$this->setACLWorldAccess($this->getAppConfig()->get('default_item_access_level') ?? __CA_ACL_NO_ACCESS__);
 		}
-		
+
 		if ($we_set_change_log_unit_id) { BaseModel::unsetChangeLogUnitID(); }
 	
 		$this->opo_app_plugin_manager->hookAfterBundleInsert(array('id' => $this->getPrimaryKey(), 'table_num' => $this->tableNum(), 'table_name' => $table, 'instance' => $this));
@@ -304,9 +304,22 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 					'table_name' => $table, 
 					'instance' => $this, 
 					'is_insert' => true, 
-					'for_duplication' => caGetOption('forDuplication', $pa_options, true)
+					'for_duplication' => caGetOption('forDuplication', $pa_options, false)
 				]
 			);
+		}
+			
+		// Set ACL for newly created record
+		if (caACLIsEnabled($this, ['anywhere' => true])) {
+			if($AUTH_CURRENT_USER_ID) { $this->setACLUsers([$AUTH_CURRENT_USER_ID => __CA_ACL_EDIT_DELETE_ACCESS__]); }
+			$this->setACLWorldAccess($this->getAppConfig()->get('default_item_access_level'));
+		}
+		
+		if(method_exists($this, 'setACLWorldAccess') && $this->hasField('access') && caACLIsEnabled($this, ['forPawtucket' => true])) {
+			$access_to_acl_map = caGetACLItemLevelMap();
+			$orig_access = $this->get('access');
+			$mapped_acl = $access_to_acl_map[$orig_access] ?? $this->getAppConfig()->get('default_item_access_level');
+			$this->setACLWorldAccess($mapped_acl); 
 		}
 		return $vn_rc;
 	}
@@ -315,7 +328,8 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 	 * Override update() to generate sortable version of user-defined identifier field
 	 *
 	 * @param array $pa_options Options include:
-	 *		bulkMode = don't abort transaction on error [Default is false]
+	 *		bulkMode = don't abort transaction on error. [Default is false]
+	 *		skipACLInheritance = Don't apply ACL inheritance rules after update. [Default is false]
 	 */ 
 	public function update($pa_options=null) {
 		global $AUTH_CURRENT_USER_ID;
@@ -327,6 +341,7 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 		}
 		
 		$bulk = caGetOption('bulkMode', $pa_options, false);
+		$skip_acl_inheritance = caGetOption('skipACLInheritance', $pa_options, false);
 
 		$this->opo_app_plugin_manager->hookBeforeBundleUpdate(array('id' => $this->getPrimaryKey(), 'table_num' => $this->tableNum(), 'table_name' => $this->tableName(), 'instance' => $this));
 
@@ -348,7 +363,6 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 
 					if (!isset($va_type_list[$this->getTypeID()])) {
 						$va_type_list = $this->getTypeList(array('directChildrenOnly' => false, 'returnHierarchyLevels' => true, 'item_id' => null));
-
 						$this->postError(2510, _t("<em>%1</em> is not a valid type for a child record of type <em>%2</em>", $va_type_list[$this->getTypeID()]['name_singular'], $va_type_list[$vn_parent_type_id]['name_singular']), "BundlableLabelableBaseModelWithAttributes->insert()", $this->tableName().'.'.$this->getTypeFieldName());
 								
 						if ($we_set_change_log_unit_id) { BaseModel::unsetChangeLogUnitID(); }
@@ -379,22 +393,12 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 		}
 		
 		// Process "access_inherit_from_parent" flag where supported
+		$update_access_inheritance = false;
+		$parent_changed = $this->changed('parent_id');
+		$access_changed = $this->changed('access');
 		if ((bool)$this->getAppConfig()->get($this->tableName().'_allow_access_inheritance') && $this->hasField('access_inherit_from_parent')) {
-			// Child record with inheritance set
-			if ((bool)$this->get('access_inherit_from_parent') && (($vn_parent_id = $this->get('parent_id')) > 0)) {
-				$t_parent = Datamodel::getInstanceByTableNum($this->tableNum(), false);
-				if ($t_parent->load($vn_parent_id)) {
-					$this->set('access', $t_parent->set('access'));
-				}
-			}
-			
-			// Parent record for which access is changing
-			if ($this->changed('access')) {
-				$this->getDb()->query("
-					UPDATE ".$this->tableName()." SET access = ? 
-					WHERE
-						parent_id = ? AND access_inherit_from_parent = 1
-				", array((int)$this->get('access'), $this->getPrimaryKey()));
+			if($access_changed || $parent_changed) {
+				$update_access_inheritance = true;
 			}
 		}
 	
@@ -416,9 +420,26 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 					'table_num' => $this->tableNum(), 
 					'table_name' => $this->tableName(), 
 					'instance' => $this, 'is_insert' => false, 
-					'for_duplication' => caGetOption('forDuplication', $pa_options, true)
+					'for_duplication' => caGetOption('forDuplication', $pa_options, false)
 				]
 			);
+		}
+		
+		if(!$skip_acl_inheritance) {
+			if(method_exists($this, 'setACLWorldAccess') && $this->hasField('access') && caACLIsEnabled($this, ['forPawtucket' => true])) {
+				$access_to_acl_map = caGetACLItemLevelMap();
+				$orig_access = $this->get('access');
+				$mapped_acl = $access_to_acl_map[$orig_access] ?? $this->getAppConfig()->get('default_item_access_level');
+				$this->setACLWorldAccess($mapped_acl);
+			}
+			
+			// Update inherited ACL values for item as location in hierarchy has changed
+			if($parent_changed && caACLIsEnabled($this, ['anywhere' => true])) {
+				ca_acl::forceACLInheritanceUpdateForRow($this);
+			}
+			if($update_access_inheritance) {
+				ca_acl::forceAccessInheritanceUpdate($this);
+			}
 		}
 		return $vn_rc;
 	}	
@@ -548,8 +569,7 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 				if($is_parent_format = $o_numbering_plugin->formatHas('PARENT', 0)) {
 					if (!$parent_id && ($this->tableName() == 'ca_objects') && $this->getAppConfig()->get('ca_objects_x_collections_hierarchy_enabled') && !$this->getAppConfig()->get('ca_objects_x_collections_hierarchy_disable_object_collection_idno_inheritance')) {
 						// Collection inheritance?
-						$obj_coll_rel_type = $this->getAppConfig()->get('ca_objects_x_collections_hierarchy_relationship_type');
-						$coll_ids = $this->getRelatedItems('ca_collections', ['restrictToRelationshipTypes' => [$obj_coll_rel_type], 'idsOnly' => true]);
+						$coll_ids = $this->getRelatedItems('ca_collections', ['restrictToRelationshipTypes' => caGetObjectCollectionHierarchyRelationshipTypes(), 'idsOnly' => true]);
 						
 						if(is_array($coll_ids) && sizeof($coll_ids)) {
 							$o_numbering_plugin->isChild(true, $p = ca_collections::getIdnoForID($coll_ids[0]));	
@@ -599,7 +619,24 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 		}
 		
 		if (isset($pa_options['user_id']) && $pa_options['user_id'] && $t_dupe->hasField('user_id')) { $t_dupe->set('user_id', $pa_options['user_id']); }
-		
+
+		// Only handle tables that actually have a 'set_code' field (eg. ca_sets)
+		if ($t_dupe->hasField('set_code')) {
+			$vs_code = trim((string)$this->get('set_code'));
+			if (!$vs_code) { $vs_code = 'set'; }
+
+			$vn_i = 1;
+			$t_lookup = Datamodel::getInstanceByTableName($table, true);
+
+			do {
+				$vs_new_code = $vs_code . '_' . $vn_i;
+				$vn_i++;
+				$t_lookup->clear(); // avoid stale state between loads
+			} while ($t_lookup->load(['set_code' => $vs_new_code]));
+
+			$t_dupe->set('set_code', $vs_new_code);
+		}
+
 		$t_dupe->insert(['forDuplication' => true]);
 		
 		if ($t_dupe->numErrors()) {
@@ -636,7 +673,9 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 			if (sizeof($va_duplicate_element_settings)) {
 				$va_attrs_to_duplicate = [];
 				foreach($va_duplicate_element_settings as $vs_bundle => $vn_duplication_setting) {
-					$va_attrs_to_duplicate[] = caConvertBundleNameToCode($vs_bundle, ['includeTablePrefix' => true]);
+					if($vn_duplication_setting > 0) {
+						$va_attrs_to_duplicate[] = caConvertBundleNameToCode($vs_bundle, ['includeTablePrefix' => true]);
+					}
 				}
 			}
 
@@ -798,8 +837,10 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 	 */
 	public function get($ps_field, $pa_options=null) {
 		$vn_s = sizeof($va_tmp = explode('.', $ps_field));
-		if ((($vn_s == 1) && ($vs_field = $ps_field)) || (($vn_s == 2) && ($va_tmp[0] == $this->tableName()) && ($vs_field = $va_tmp[1]))) {
-			if ($this->hasField($vs_field) || (in_array(strtolower($vs_field), ['created', 'lastmodified']))) { return BaseModel::get($vs_field, $pa_options); }
+		if (!isset($pa_options['modifier']) && ((($vn_s == 1) && ($vs_field = $ps_field)) || (($vn_s == 2) && ($va_tmp[0] == $this->tableName()) && ($vs_field = $va_tmp[1])))) {
+			if ($this->hasField($vs_field) || (in_array(strtolower($vs_field), ['created', 'lastmodified']))) { 
+				return BaseModel::get($vs_field, $pa_options); 
+			}
 		}
 		if($this->_rowAsSearchResult) {
 			if (method_exists($this->_rowAsSearchResult, "filterPrimaryRepresentations")) {
@@ -1249,7 +1290,7 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 			if ($t_user->getBundleAccessLevel($this->tableName(), $ps_bundle_name) < __CA_BUNDLE_ACCESS_READONLY__) { return false; }
 		}
 		
-		if ((defined("__CA_APP_TYPE__") && (__CA_APP_TYPE__ == "PAWTUCKET") && ($this->hasField('access')))) {
+		if (!caACLIsEnabled($this) && (defined("__CA_APP_TYPE__") && (__CA_APP_TYPE__ == "PAWTUCKET") && ($this->hasField('access')))) {
 			$va_access = caGetUserAccessValues($po_request);
 			if (is_array($va_access) && sizeof($va_access) && !in_array($this->get('access'), $va_access)) { return false; }
 		}
@@ -1308,6 +1349,11 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 		if ($ps_bundle_name) {
 			if ($t_user->getBundleAccessLevel($this->tableName(), $ps_bundle_name) < __CA_BUNDLE_ACCESS_EDIT__) { return false; }
 		}
+		
+		if (!caACLIsEnabled($this) && (defined("__CA_APP_TYPE__") && (__CA_APP_TYPE__ == "PAWTUCKET") && ($this->hasField('access')))) {
+			$va_access = caGetUserAccessValues($po_request);
+			if (is_array($va_access) && sizeof($va_access) && !in_array($this->get('access'), $va_access)) { return false; }
+		}
  		
  		return true;
  	}
@@ -1361,9 +1407,14 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 		}
 		
  		// Check actions
- 		if (!$this->getPrimaryKey() || !$t_user->canDoAction("can_delete_{$table}")) {
+ 		if (!$this->getPrimaryKey() || ($t_user->canDoAction("can_delete_{$table}") === false)) {
  			return false;
  		}
+ 		
+		if (!caACLIsEnabled($this) && (defined("__CA_APP_TYPE__") && (__CA_APP_TYPE__ == "PAWTUCKET") && ($this->hasField('access')))) {
+			$va_access = caGetUserAccessValues($po_request);
+			if (is_array($va_access) && sizeof($va_access) && !in_array($this->get('access'), $va_access)) { return false; }
+		}
  		
  		return true;
  	}
@@ -1673,6 +1724,9 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 				break;
 			# -------------------------------------------------
 			case 'intrinsic':
+				// Skip abandoned fields
+				if(in_array($ps_bundle_name, ['sub_type_left_id', 'include_subtypes_left', 'sub_type_right_id', 'include_subtypes_right'], true)) { break; }
+				
 				if (!($pa_options['label'] = caExtractSettingValueByLocale($pa_bundle_settings, 'label', $g_ui_locale))) {
 					$pa_options['label'] = $this->getFieldInfo($ps_bundle_name, 'LABEL');
 				}
@@ -1801,6 +1855,10 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 				$vs_display_format = $o_config->get('bundle_element_display_format');
 				
 				$bundle_code = $this->tableName().".{$vs_attr_element_code}";
+				
+				if(ca_metadata_elements::isDeleted($vs_attr_element_code)) { 
+					break;
+				}
 				
 				if(!strlen($vs_element = $this->getAttributeHTMLFormBundle($pa_options['request'], $pa_options['formName'], $vs_attr_element_code, $ps_placement_code, $pa_bundle_settings, $pa_options))) {
 					// No bundle?
@@ -2035,6 +2093,7 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 					case 'ca_search_form_type_restrictions':
 					case 'ca_editor_ui_screen_type_restrictions':
 					case 'ca_editor_ui_type_restrictions':
+					case 'ca_relationship_type_restrictions':
 						$vs_element .= $this->getTypeRestrictionsHTMLFormBundle($pa_options['request'], $pa_options['formName'], $ps_placement_code, $pa_options);
 						break;
 					# -------------------------------
@@ -2344,6 +2403,7 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 		$tmp = explode('.', $field);
 		if ((sizeof($tmp) == 2) && ($tmp[0] == $this->getLabelTableName()) && ($tmp[1] == $this->getLabelDisplayField())) {
 			$tmp[0] = $this->tableName();
+			$tmp[2] = $tmp[1];
 			$tmp[1] = 'preferred_labels';
 			$field = join('.', $tmp);
 		}
@@ -2429,7 +2489,7 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 		}
 		
 		// maybe it's a special bundle name?
-		if (($tmp[0] === $this->tableName()) && isset($this->BUNDLES[$tmp[1]]) && $this->BUNDLES[$tmp[1]]['label']) {
+		if (!$dlabel && ($tmp[0] === $this->tableName()) && isset($this->BUNDLES[$tmp[1]]) && $this->BUNDLES[$tmp[1]]['label']) {
 			$dlabel = $this->BUNDLES[$tmp[1]]['label'];
 		}
 		
@@ -2944,6 +3004,28 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 				}
 			}
 			
+			$readonly_when = $this->getAppConfig()->get("{$vs_table_name}_readonly_when");
+			if(is_array($readonly_when)) {
+				foreach($readonly_when as $k => $skipinfo) {
+					if($this->evaluateExpression($skipinfo['rule'])) {
+						$readonly_when[$k]['readonly'] = true;
+					} else {
+						unset($readonly_when[$k]);
+					}
+				}
+			}
+			
+			$force_readonly = [];
+			if(($vs_table_name === 'ca_object_representations') && is_array($readonly_when_fetched_from = $this->getAppConfig()->get('ca_object_representations_make_bundles_readonly_when_fetched_from'))) {
+				$fetched_by = $this->getMediaInfo('media', 'INPUT', 'FETCHED_BY');
+				if(is_array($readonly_when_fetched_from[$fetched_by] ?? null)) {
+					foreach($readonly_when_fetched_from[$fetched_by] as $r) {
+						$tmp = explode('.', $r);
+						$r = array_pop($tmp);
+						$force_readonly[$r] = true;
+					}
+				}
+			}
 			$vn_c = 0;
 			foreach($va_bundles as $va_bundle) {
 				if ($va_bundle['bundle_name'] === $vs_type_id_fld) { continue; }	// skip type_id
@@ -2985,6 +3067,21 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 					// no edit access so bail
 					//$this->postError(2320, _t('Access denied to screen %1', $pm_screen), "BundlableLabelableBaseModelWithAttributes->getBundleFormHTMLForScreen()");				
 					continue;
+				}
+				
+				if(is_array($readonly_when)) {
+					foreach($readonly_when as $k => $skipinfo) {
+						if(
+							!in_array("{$vs_table_name}.{$va_bundle['bundle_name']}", $skipinfo['skip'] ?? [])
+							&&
+							!in_array($va_bundle['bundle_name'], $skipinfo['skip'] ?? [])
+						) {
+							$va_bundle['settings']['readonly'] = true;	
+						}
+					}	
+				}
+				if(is_array($force_readonly) && ($force_readonly[$va_bundle['bundle_name']] ?? false)) {
+					$va_bundle['settings']['readonly'] = true;	
 				}
 				
 				// Apply policy relationship type restriction for related, if set
@@ -3153,120 +3250,128 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 	/**
 	 *
 	 */
-	private function _getHierarchyLocationHTMLFormBundleInfo($po_request, $ps_form_name, $ps_placement_code, $pa_options=null, $pa_bundle_settings=null) {
-		$vs_view_path = (isset($pa_options['viewPath']) && $pa_options['viewPath']) ? $pa_options['viewPath'] : $po_request->getViewsDirectoryPath();
-		$o_view = new View($po_request, "{$vs_view_path}/bundles/");
+	private function _getHierarchyLocationHTMLFormBundleInfo(RequestHTTP $request,  string $form_name, string $placement_code, ?array $options=null, ?array $bundle_settings=null) : ?View {
+		$view_path = caGetOption('viewPath', $options, $request->getViewsDirectoryPath());
 		
-		$pb_batch = caGetOption('batch', $pa_options, false);
+		$o_view = new View($request, "{$view_path}/bundles/");
+		$object_collections_hierarchy_enabled = (bool)$this->getAppConfig()->get('ca_objects_x_collections_hierarchy_enabled');
 		
-		if(!is_array($pa_bundle_settings)) { $pa_bundle_settings = []; }
+		$batch = caGetOption('batch', $options, false);
+		if(!is_array($bundle_settings)) { $bundle_settings = []; }
 		
-		if (!($vs_label_table_name = $this->getLabelTableName())) { return ''; }
+		if (!($label_table_name = $this->getLabelTableName())) { return ''; }
 		
-		$o_view->setVar('id_prefix', $ps_form_name);
-		$o_view->setVar('placement_code', $ps_placement_code);
-		$o_view->setVar('t_subject', $this);
-		if (!($vn_id = $this->getPrimaryKey())) {
-			$vn_parent_id = $vn_id = $po_request->getParameter($this->HIERARCHY_PARENT_ID_FLD, pString);
+		if (!($id = $this->getPrimaryKey())) {
+			$parent_id = $id = $request->getParameter($this->HIERARCHY_PARENT_ID_FLD, pString);
 		} else {
-			$vn_parent_id = $this->get($this->HIERARCHY_PARENT_ID_FLD);
+			$parent_id = $this->get($this->HIERARCHY_PARENT_ID_FLD);
 		}
-		$vs_display_fld = $this->getLabelDisplayField();
+		$display_fld = $this->getLabelDisplayField();
 		
 		if ($this->supportsPreferredLabelFlag()) {
-			if (!($va_ancestor_list = $this->getHierarchyAncestors($vn_id, array(
-				'additionalTableToJoin' => $vs_label_table_name, 
+			if (!($ancestor_list = $this->getHierarchyAncestors($id, [
+				'additionalTableToJoin' => $label_table_name, 
 				'additionalTableJoinType' => 'LEFT',
-				'additionalTableSelectFields' => array($vs_display_fld, 'locale_id'),
-				'additionalTableWheres' => array('('.$vs_label_table_name.'.is_preferred = 1 OR '.$vs_label_table_name.'.is_preferred IS NULL)'),
+				'additionalTableSelectFields' => array($display_fld, 'locale_id'),
+				'additionalTableWheres' => ["({$label_table_name}.is_preferred = 1 OR {$label_table_name}.is_preferred IS NULL)"],
 				'includeSelf' => true
-			)))) {
-				$va_ancestor_list = [];
+			]))) {
+				$ancestor_list = [];
 			}
 		} else {
-			if (!($va_ancestor_list = $this->getHierarchyAncestors($vn_id, array(
-				'additionalTableToJoin' => $vs_label_table_name, 
+			if (!($ancestor_list = $this->getHierarchyAncestors($id, [
+				'additionalTableToJoin' => $label_table_name, 
 				'additionalTableJoinType' => 'LEFT',
-				'additionalTableSelectFields' => array($vs_display_fld, 'locale_id'),
+				'additionalTableSelectFields' => array($display_fld, 'locale_id'),
 				'includeSelf' => true
-			)))) {
-				$va_ancestor_list = [];
+			]))) {
+				$ancestor_list = [];
 			}
 		}
 		
+		$ancestors_by_locale = [];
+		$pk = $this->primaryKey();
+		$idno_field = $this->getProperty('ID_NUMBERING_ID_FIELD');
 		
-		$va_ancestors_by_locale = [];
-		$vs_pk = $this->primaryKey();
-		$vs_idno_field = $this->getProperty('ID_NUMBERING_ID_FIELD');
-		
-		$vs_hierarchy_type = $this->getProperty('HIERARCHY_TYPE');
-		foreach($va_ancestor_list as $vn_ancestor_id => $va_info) {
-			switch($vs_hierarchy_type) {
+		$hierarchy_type = $this->getProperty('HIERARCHY_TYPE');
+		foreach($ancestor_list as $ancestor_id => $info) {
+			switch($hierarchy_type) {
 				case __CA_HIER_TYPE_SIMPLE_MONO__:
-					if (!$va_info['NODE']['parent_id']) { continue(2); }
+					if (!$info['NODE']['parent_id']) { continue(2); }
 					break;
 				case __CA_HIER_TYPE_MULTI_MONO__:
-					if (!$va_info['NODE']['parent_id']) {
-						$vn_item_id = $va_info['NODE'][$vs_pk];
-						$va_ancestors_by_locale[$vn_item_id][$vn_locale_id] = array(
-							'item_id' => $vn_item_id,
-							'parent_id' => $va_info['NODE']['parent_id'],
-							'label' => $this->getHierarchyName($vn_item_id),
-							'idno' => $va_info['NODE'][$vs_idno_field],
+					if (!$info['NODE']['parent_id']) {
+						$item_id = $info['NODE'][$pk];
+						$ancestors_by_locale[$item_id][$locale_id] = [
+							'item_id' => $item_id,
+							'parent_id' => $info['NODE']['parent_id'],
+							'label' => $this->getHierarchyName($item_id),
+							'idno' => $info['NODE'][$idno_field],
 							'locale_id' => null,
 							'table' => $this->tableName()
 				
-						);
+						];
 						continue(2);
 					}
 					break;
 			}
-			if (!$va_info['NODE']['parent_id']) { continue; } // TODO: do we need an option to control visibility of root?
+			if (($hierarchy_type !== __CA_HIER_TYPE_ADHOC_MONO__) && !$info['NODE']['parent_id']) { continue; } // TODO: do we need an option to control visibility of root?
 			
-			$vn_locale_id = isset($va_info['NODE']['locale_id']) ? $va_info['NODE']['locale_id'] : null;
-			$va_ancestor = array(
-				'item_id' => $vn_item_id = $va_info['NODE'][$vs_pk],
-				'parent_id' => $va_info['NODE']['parent_id'] ?? null,
-				'label' => $va_info['NODE'][$vs_display_fld] ?? $va_info['NODE'][$vs_display_fld] ?? $va_info['NODE'][$vs_idno_field],
-				'idno' => $va_info['NODE'][$vs_idno_field] ?? null,
-				'locale_id' => $vn_locale_id,
+			$locale_id = isset($info['NODE']['locale_id']) ? $info['NODE']['locale_id'] : null;
+			$ancestor = [
+				'item_id' => $item_id = $info['NODE'][$pk],
+				'parent_id' => $info['NODE']['parent_id'] ?? null,
+				'label' => $info['NODE'][$display_fld] ?? $info['NODE'][$display_fld] ?? $info['NODE'][$idno_field],
+				'idno' => $info['NODE'][$idno_field] ?? null,
+				'locale_id' => $locale_id,
 				'table' => $this->tableName()
 				
-			);
-			$va_ancestors_by_locale[$vn_item_id][$vn_locale_id] = $va_ancestor;
+			];
+			$ancestors_by_locale[$item_id][$locale_id] = $ancestor;
 		}
 		
-		$va_ancestor_list = array_reverse(caExtractValuesByUserLocale($va_ancestors_by_locale), true);
+		$ancestor_list = array_reverse(caExtractValuesByUserLocale($ancestors_by_locale), true);
 
 		if (!$this->getPrimaryKey()) {
-			$va_ancestor_list[null] = array(
+			$ancestor_list[null] = [
 				$this->primaryKey() => '',
 				$this->getLabelDisplayField() => _t('New %1', $this->getProperty('NAME_SINGULAR'))
-			);
+			];
 		}
 		
-		$vs_object_collection_rel_type = $this->getAppConfig()->get('ca_objects_x_collections_hierarchy_relationship_type');
-		$vb_strict_type_hierarchy = $po_request->config->get($this->tableName().'_enforce_strict_type_hierarchy');
+		$object_collection_rel_types = caGetObjectCollectionHierarchyRelationshipTypes();
+		$vb_strict_type_hierarchy = $request->config->get($this->tableName().'_enforce_strict_type_hierarchy');
 	
 		$t_object = new ca_objects();
-		$t_rel = ca_relationship_types::findAsInstance(['table_num' => Datamodel::getTableNum('ca_objects_x_collections'), 'type_code' => $vs_object_collection_rel_type]);
+		
+		$rel_restrict_to_types = [];
+		if(is_array($object_collection_rel_types)) {
+			foreach($object_collection_rel_types as $object_collection_rel_type) {
+				if($t_rel = ca_relationship_types::findAsInstance(['table_num' => Datamodel::getTableNum('ca_objects_x_collections'), 'type_code' => $object_collection_rel_types])) {
+					$t = $t_rel->get('ca_relationship_types.include_subtypes_left') ? 
+						caMakeTypeIDList('ca_objects', [$t_rel->get('ca_relationship_types.sub_type_left_id')], array_merge($options, ['dont_include_subtypes_in_type_restriction' => true]))
+						: 
+						[$t_rel->get('ca_relationship_types.sub_type_left_id')];
+					$object_collection_rel_types = array_merge($object_collection_rel_types, $t);
+				}
 	
+			}
+		}
+		
 		$o_view->setVar('objectTypeList', trim($t_object->getTypeListAsHTMLFormElement("{$ps_placement_code}{$ps_form_name}object_type_id", 
 			['id' => "{$ps_placement_code}{$ps_form_name}objectTypeList"], 
 			[	'childrenOfCurrentTypeOnly' => (bool)$vb_strict_type_hierarchy, 
 				'includeSelf' => !(bool)$vb_strict_type_hierarchy, 
 				'directChildrenOnly' => $vb_strict_type_hierarchy && ($vb_strict_type_hierarchy !== '~'),
-				'restrictToTypes' => $t_rel ? [$t_rel->get('ca_relationship_types.sub_type_left_id')] : null,
-				'dontIncludeSubtypesInTypeRestriction' => $t_rel ? !$t_rel->get('ca_relationship_types.include_subtypes_left') : null
+				'restrictToTypes' => $object_collection_rel_types,
+				'dontIncludeSubtypesInTypeRestriction' => true
 			])));
 					
 		
 		$o_view->setVar('object_collection_collection_ancestors', []); // collections to display as object parents when ca_objects_x_collections_hierarchy_enabled is enabled
 		if (($this->tableName() == 'ca_objects') && $this->getAppConfig()->get('ca_objects_x_collections_hierarchy_enabled')) {
-				
 			// Is object part of a collection?
-			
-			$va_object_ids = array_keys($va_ancestor_list);
+			$va_object_ids = array_keys($va_ancestor_list ?? []);
 			$vn_top_object_id = array_shift($va_object_ids);
 			if ($vn_top_object_id != $this->getPrimaryKey()) { 
 				$t_object = Datamodel::getInstanceByTableName("ca_objects", true);
@@ -3274,7 +3379,7 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 			} else { 
 				$t_object = $this;
 			}
-			if(is_array($va_collections = $t_object->getRelatedItems('ca_collections', array('restrictToRelationshipTypes' => array($vs_object_collection_rel_type))))) {
+			if(is_array($va_collections = $t_object->getRelatedItems('ca_collections', array('restrictToRelationshipTypes' => $object_collection_rel_types)))) {
 				$va_related_collections_by_level = [];
 				foreach($va_collections as $vs_key => $va_collection) {
 					$va_related_collections_by_level[$va_collection['collection_id']] = array(
@@ -3311,29 +3416,110 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 			}
 		}
 		
-		$vn_first_id = null;
-		if ($pb_batch && ($pn_set_id = caGetOption('set_id', $pa_options, null))) { 
+		if ($object_collections_hierarchy_enabled) {
+			
+			$type_selector 	= trim($this->getTypeListAsHTMLFormElement(
+				"{$placement_code}type_id", 
+				['id' => "{$placement_code}{$form_name}typeList"], 
+				[
+					'childrenOfCurrentTypeOnly' => (bool)$strict_type_hierarchy, 
+					'includeSelf' => !(bool)$strict_type_hierarchy, 
+					'directChildrenOnly' => $strict_type_hierarchy && ($strict_type_hierarchy !== '~'),
+					'restrictToTypes' => $bundle_settings['restrict_to_types'] ?: null
+				]
+			));
+			
+			if($this->tableName() == 'ca_collections') {
+				$o_view->setVar('objectTypeList', trim($t_object->getTypeListAsHTMLFormElement("{$placement_code}{$form_name}object_type_id", 
+					['id' => "{$placement_code}{$form_name}objectTypeList"], 
+					[	'childrenOfCurrentTypeOnly' => (bool)$strict_type_hierarchy, 
+						'includeSelf' => !(bool)$strict_type_hierarchy, 
+						'directChildrenOnly' => $strict_type_hierarchy && ($strict_type_hierarchy !== '~'),
+						'restrictToTypes' => $t_rel ? [$t_rel->get('ca_relationship_types.sub_type_left_id')] : null,
+						'dontIncludeSubtypesInTypeRestriction' => $t_rel ? !$t_rel->get('ca_relationship_types.include_subtypes_left') : null
+					])));
+			}
+			if($this->tableName() == 'ca_objects') {
+				// Is object part of a collection?
+				$object_ids = array_keys($ancestor_list);
+				$top_object_id = array_shift($object_ids);
+				if ($top_object_id != $this->getPrimaryKey()) { 
+					$t_object = Datamodel::getInstanceByTableName("ca_objects", true);
+					$t_object->load($top_object_id); 
+				} else { 
+					$t_object = $this;
+				}
+				if(is_array($collections = $t_object->getRelatedItems('ca_collections', ['restrictToRelationshipTypes' => [$object_collection_rel_type]]))) {
+					$related_collections_by_level = [];
+					foreach($collections as $key => $collection) {
+						$related_collections_by_level[$collection['collection_id']] = [
+							'item_id' => $collection['collection_id'],
+							'parent_id' => $collection['parent_id'],
+							'label' => $collection['label'],
+							'idno' => $collection['idno'],
+							'table' => 'ca_collections'
+						];
+						$t_collection = new ca_collections();
+						if (!($collection_ancestor_list = $t_collection->getHierarchyAncestors($collection['collection_id'], [
+							'additionalTableToJoin' => 'ca_collection_labels', 
+							'additionalTableJoinType' => 'LEFT',
+							'additionalTableSelectFields' => array('name', 'locale_id'),
+							'additionalTableWheres' => array('(ca_collection_labels.is_preferred = 1 OR ca_collection_labels.is_preferred IS NULL)'),
+							'includeSelf' => false
+						]))) {
+							$collection_ancestor_list = [];
+						}
+						$i = 1;
+						foreach($collection_ancestor_list as $id => $collection_ancestor) {
+							$related_collections_by_level[$collection_ancestor['NODE']['collection_id']] = [
+								'item_id' => $collection_ancestor['NODE']['collection_id'],
+								'parent_id' => $collection_ancestor['NODE']['parent_id'],
+								'label' => $collection_ancestor['NODE']['name'],
+								'idno' => $collection_ancestor['NODE']['idno'],
+								'table' => 'ca_collections'
+							];
+							$i++;
+						}
+						break; // only process the first collection (for now)
+					}
+					$o_view->setVar('object_collection_collection_ancestors', array_reverse($related_collections_by_level, true));
+				}
+			}
+		} else {
+			$type_selector 	= trim($this->getTypeListAsHTMLFormElement(
+				"{$placement_code}type_id", 
+				['id' => "{$placement_code}{$form_name}typeList"], 
+				['restrictToTypes' => $bundle_settings['restrict_to_types'] ?: null]
+			));
+		}
+		$o_view->setVar('type_selector', $type_selector);
+		
+		$first_id = null;
+		if ($batch && ($pn_set_id = caGetOption('set_id', $options, null))) { 
 			$t_set = new ca_sets($pn_set_id); 
-			if (is_array($va_ids = $t_set->getItemRowIDs()) && sizeof($va_ids)) {
-				$vn_first_id = array_shift($va_ids);
+			if (is_array($ids = $t_set->getItemRowIDs()) && sizeof($ids)) {
+				$first_id = array_shift($ids);
 			}
 		}
 
-		$type_id = $po_request->getParameter('type_id', pInteger);
-		
-		$id = ($pb_batch && $vn_first_id ? $vn_first_id : $this->getPrimaryKey());
+		$type_id = $request->getParameter('type_id', pInteger);
+		$id = ($batch && $first_id ? $first_id : $this->getPrimaryKey());
 		
 		if(!$id && $type_id) {
 			$this->get('type_id', $type_id);
 		}
 		
-		$o_view->setVar('batch', $pb_batch);
-		$o_view->setVar('parent_id', $vn_parent_id);
-		$o_view->setVar('ancestors', $va_ancestor_list);
+		$o_view->setVar('object_collections_hierarchy_enabled', $object_collections_hierarchy_enabled); 
+		$o_view->setVar('id_prefix', $form_name);
+		$o_view->setVar('placement_code', $placement_code);
+		$o_view->setVar('t_subject', $this);
+		$o_view->setVar('batch', $batch);
+		$o_view->setVar('parent_id', $parent_id);
+		$o_view->setVar('ancestors', $ancestor_list);
 		$o_view->setVar('id', $id);
 		$o_view->setVar('type_id', $type_id);
 		$o_view->setVar('t_type', $this->getTypeInstance());
-		$o_view->setVar('settings', $pa_bundle_settings);
+		$o_view->setVar('settings', $bundle_settings);
 		
 		return $o_view;
 	}
@@ -3873,7 +4059,7 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 				if ($vs_parent_table == $this->tableName()) {
 					if ($vn_parent_id != $this->getPrimaryKey()) { return __CA_PARENT_CHANGED__; }
 				} else {
-					if ((bool)$this->getAppConfig()->get('ca_objects_x_collections_hierarchy_enabled') && ($vs_parent_table == 'ca_collections') && ($this->tableName() == 'ca_objects') && ($vs_coll_rel_type = $this->getAppConfig()->get('ca_objects_x_collections_hierarchy_relationship_type'))) {
+					if ((bool)$this->getAppConfig()->get('ca_objects_x_collections_hierarchy_enabled') && ($vs_parent_table == 'ca_collections') && ($this->tableName() == 'ca_objects') && is_array($coll_rel_types = caGetObjectCollectionHierarchyRelationshipTypes()) && sizeof($coll_rel_types)) {
 						return __CA_PARENT_COLLECTION_CHANGED__;
 					}
 				}
@@ -3938,6 +4124,7 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 		$va_errors = [];
 		
 		$ifv = [];	// incoming form values
+		$npl = [];	// values on screen but not present in incoming form values
 			
 		$vb_read_only_because_deaccessioned = ($this->hasField('is_deaccessioned') && (bool)$this->getAppConfig()->get('deaccession_dont_allow_editing') && (bool)$this->get('is_deaccessioned'));
 
@@ -4015,7 +4202,8 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 							break;
 						default:
 							// Look for fully qualified intrinsic
-							$vs_v = $po_request->parameterExists("{$vs_placement_code}{$vs_form_prefix}{$vs_f}") ? $po_request->getParameter("{$vs_placement_code}{$vs_form_prefix}{$vs_f}", pString) : null;
+							$vs_v = !is_null($po_request->parameterExists("{$vs_placement_code}{$vs_form_prefix}{$vs_f}")) ? $po_request->getParameter("{$vs_placement_code}{$vs_form_prefix}{$vs_f}", pString) : null;
+							
 							if(is_null($vs_v)) {
 								// fall back to simple field name intrinsic spec - still used for "mandatory" fields such as type_id and parent_id
 								$vs_v = $po_request->parameterExists("{$vs_f}") ? $po_request->getParameter("{$vs_f}", pString) : null;
@@ -4123,12 +4311,12 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 							$va_inserted_attributes_by_element[$vn_element_id][$vn_c]['value_source'] = $va_attributes_to_insert[$vn_c]['value_source'] = $value_source; 
 						}
 						$va_inserted_attributes_by_element[$vn_element_id][$vn_c][$va_matches[1]] = $va_attributes_to_insert[$vn_c][$va_matches[1]] = $vs_val;
-					} else {
+					} elseif(preg_match('/'.$vs_placement_code.$vs_form_prefix.'_attribute_'.$vn_element_id.'_([\d]+)_delete/', $vs_key, $va_matches)) {
 						// is it a delete key?
-						if (preg_match('/'.$vs_placement_code.$vs_form_prefix.'_attribute_'.$vn_element_id.'_([\d]+)_delete/', $vs_key, $va_matches)) {
-							$vn_attribute_id = intval($va_matches[1]);
-							$va_attributes_to_delete[$vn_attribute_id] = true;
-						}
+						$vn_attribute_id = intval($va_matches[1]);
+						$va_attributes_to_delete[$vn_attribute_id] = true;
+					} else {
+						$npl[$vn_element_id] = true;
 					}
 				}
 				
@@ -4141,6 +4329,7 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 					if (preg_match('/'.$vs_placement_code.$vs_form_prefix.'_attribute_'.$vn_element_id.'_locale_id_new_([\d]+)/', $vs_key, $va_locale_matches)) { 
 						$vn_locale_c = intval($va_locale_matches[1]);
 						$va_locales[$vn_locale_c] = $vs_val;
+						unset($npl[$vn_element_id]);
 						continue; 
 					}
 					// is it a newly created attribute?
@@ -4152,6 +4341,7 @@ class BundlableLabelableBaseModelWithAttributes extends LabelableBaseModelWithAt
 						$va_inserted_attributes_by_element[$vn_element_id][$vn_c]['locale_id'] = $va_attributes_to_insert[$vn_c]['locale_id'] = $va_locales[$vn_c]; 
 						$va_val['_uploaded_file'] = true;
 						$va_inserted_attributes_by_element[$vn_element_id][$vn_c][$va_matches[1]] = $va_attributes_to_insert[$vn_c][$va_matches[1]] = $va_val;
+						unset($npl[$vn_element_id]);
 					}
 				}
 if (!$batch) {				
@@ -4189,7 +4379,7 @@ if (!$batch) {
 						}
 						
 						//
-						// Check to see if there are any values in the element set that are not in the  attribute we're editing
+						// Check to see if there are any values in the element set that are not in the attribute we're editing
 						// If additional sub-elements were added to the set after the attribute we're updating was created
 						// those sub-elements will not have corresponding values returned by $o_attr->getValues() above.
 						// Because we use the element_ids in those values to pull request parameters, if an element_id is missing
@@ -4216,7 +4406,17 @@ if (!$batch) {
 									continue;
 								}
 							} 
-							$va_attr_update[$sub_element_id] = $vs_attr_val;
+							
+							if($po_request->getParameter("{$vs_k}_clear", pInteger)) {
+								// is it a media clear key?
+								$va_attr_update[$sub_element_id] = [
+									'tmp_name' => '__CLEAR__',
+									'_uploaded_file' => true,
+									'size' => 0
+								];
+							} else {
+								$va_attr_update[$sub_element_id] = $vs_attr_val;
+							}
 							$isset = true;
 						}
 						if (!$isset) { continue; }
@@ -4225,7 +4425,9 @@ if (!$batch) {
 						if(!$this->editAttribute($vn_attribute_id, $vn_element_set_id, $va_attr_update, null, ['batch' => $batch])) {
 							$po_request->addActionErrors($this->errors);
 						}
-						 $ifv[$vs_element_set_code][] = ($va_attr_update + ['attribute_id' => $vn_attribute_id]);
+						unset($npl[$vn_element_set_id]);
+						$ifv[$vs_element_set_code][] = ($va_attr_update + ['attribute_id' => $vn_attribute_id]);
+						
 					}
 				}
 			}
@@ -4233,18 +4435,29 @@ if (!$batch) {
 			// do inserts
 			foreach($va_attributes_to_insert as $va_attribute_to_insert) {
 				$this->clearErrors();
+				unset($npl[$vn_element_id]);
 				if(!$this->addAttribute($va_attribute_to_insert, $vn_element_id, null, ['batch' => $batch])) {
 					$po_request->addActionErrors($this->errors);
 				}
+			}
+		}
+		
+		// Check counts on elements not otherwise added, edited or deleted
+		// Provides for display of min/max errors on elements with no associated values
+		foreach(array_keys($npl) as $element_id) {
+			$this->clearErrors();
+			if(!$this->checkAttributeRepeatCounts($element_id)) {
+				$po_request->addActionErrors($this->errors);
 			}
 		}
 }
 
 	$pa_options['ifv'] = $ifv;	// return incoming form values via options to caller
 		
+
 		//
 		// Call processBundlesBeforeBaseModelSave() method in sub-class, if it is defined. The method is passed
-		// a list of bundles, the form prefix, the current request and the options passed to saveBundlesForScreen() –
+		// a list of bundles, the form prefix, the current request and the options passed to saveBundlesForScreen() -
 		// everything needed to perform custom processing using the incoming form content that is being saved.
 		// 
 		// A processBundlesBeforeBaseModelSave() method is rarely needed, but can be handy when you need to do something model-specific
@@ -4314,6 +4527,17 @@ if (!$batch) {
 			
 			if ($batch && ($po_request->getParameter($vs_placement_code.$vs_form_prefix.'_batch_mode', pString) !== '_replace_')) { continue; }
 			
+			// Skip if not in request - may be filtered off of form
+			if(
+				!$po_request->parameterExists("{$vs_placement_code}{$vs_form_prefix}_new_parent_id")
+				&&
+				!$po_request->parameterExists("{$vs_placement_code}_new_parent_id")
+				&&
+				!$po_request->parameterExists("{$vs_placement_code}{$vs_form_prefix}_move_selection")
+			) {
+				continue;
+			}
+			
 			$parent_tmp = explode("-", $po_request->getParameter(["{$vs_placement_code}{$vs_form_prefix}_new_parent_id", "{$vs_placement_code}_new_parent_id"], pString));
 			
 			$multiple_move_selection = array_filter(explode(";", $po_request->getParameter("{$vs_placement_code}{$vs_form_prefix}_move_selection", pString)), function($v) {
@@ -4347,7 +4571,7 @@ if (!$batch) {
 								
 								$t->set($this->HIERARCHY_PARENT_ID_FLD, $vn_parent_id); 
 								if(!$t->update()) {
-									$this->postError(2510, _t('Could not move item [%1]: %2', $t->getPrimaryKey(), join("; ", $this->getErrors())), "BundlableLabelableBaseModelWithAttributes->saveBundlesForScreen()");
+									$this->postError(2510, _t('Could not move item [%1]: %2', $t->getPrimaryKey(), join("; ", $t->getErrors())), "BundlableLabelableBaseModelWithAttributes->saveBundlesForScreen()");
 									$po_request->addActionErrors($this->errors());
 								}
 							}
@@ -4361,11 +4585,11 @@ if (!$batch) {
 								$t->set($t->HIERARCHY_PARENT_ID_FLD, null);
 								$t->set($t->HIERARCHY_ID_FLD, $t->getPrimaryKey());
 								if(!$t->update()) {
-									$this->postError(2510, _t('Could not move object under collection: %1', join("; ", $this->getErrors())), "BundlableLabelableBaseModelWithAttributes->saveBundlesForScreen()");
+									$this->postError(2510, _t('Could not move object under collection: %1', join("; ", $t->getErrors())), "BundlableLabelableBaseModelWithAttributes->saveBundlesForScreen()");
 									$po_request->addActionErrors($this->errors());
 								}
 								if (!($t->addRelationship('ca_collections', $vn_parent_id, $coll_rel_type))) {
-									$this->postError(2510, _t('Could not move object under collection: %1', join("; ", $this->getErrors())), "BundlableLabelableBaseModelWithAttributes->saveBundlesForScreen()");
+									$this->postError(2510, _t('Could not move object under collection: %1', join("; ", $t->getErrors())), "BundlableLabelableBaseModelWithAttributes->saveBundlesForScreen()");
 									$po_request->addActionErrors($this->errors());
 								}
 							}						
@@ -4829,7 +5053,6 @@ if (!$batch) {
                             $va_file_list = array_map(function($v) { $v['is_form_upload'] = 1; return $v; }, $_FILES);
                             foreach($_REQUEST as $vs_key => $vs_value) {
                                 if (preg_match('/^'.$vs_prefix_stub.'media_url_new_([\d]+)$/', $vs_key, $va_matches)) {
-                                	if(!isURL($vs_value, ['strict' => true, 'schemes' => ['http', 'https']])) { continue; }
                                     $va_file_list[$vs_key] = array(
                                         'url' => $vs_value,
                                         'index' => (int)$va_matches[1]
@@ -4871,6 +5094,20 @@ if (!$batch) {
                             	$is_form_upload = caGetOption('is_form_upload', $va_values, false, ['castTo' => 'boolean']);
                             	$va_values['tmp_name'] = stripslashes($va_values['tmp_name']);
                                 $this->clearErrors();
+                                
+        
+                                if($vb_allow_fetching_of_urls && preg_match('/^'.$vs_prefix_stub.'media_url_new_([\d]+)$/', $vs_key, $va_matches)) {
+                                	if(($s = $po_request->getParameter($vs_key, pString)) && !isUrl($s)){
+                                		// Attempt to translate non-URL value to URL using media_url plugin search facility (if available)
+                                		$media_url = new CA\MediaUrl();
+										if(is_array($res = $media_url->search($s)) && sizeof($res)) {
+											$po_request->setParameter($vs_key, $res[0]['url']);
+											$va_values['url'] = $res[0]['url'];
+										} else {
+											continue; 
+										}
+                                	}
+                                }
                             
 								if (
 									(!($va_values['_empty_'] ?? false)) &&
@@ -5224,6 +5461,7 @@ if (!$batch) {
 					case 'ca_bundle_display_type_restrictions':
 					case 'ca_editor_ui_screen_type_restrictions':
 					case 'ca_search_form_type_restrictions':
+					case 'ca_relationship_type_restrictions':
 						if ($batch) { break; } // not supported in batch mode
 						$this->saveTypeRestrictionsFromHTMLForm($po_request, $vs_form_prefix, $vs_placement_code);
 						break;
@@ -6351,7 +6589,7 @@ if (!$batch) {
  	 *			showDeleted = Return related items that have been deleted. [Default is false]
  	 *			primaryIDs = array of primary keys in related table to exclude from returned list of items. Array is keyed on table name for compatibility with the parameter as used in the caProcessTemplateForIDs() helper [Default is null - nothing is excluded].
  	 *			restrictToBundleValues = Restrict returned items to those with specified bundle values. Specify an associative array with keys set to bundle names and key values set to arrays of values to filter on (eg. [bundle_name1 => [value1, value2, ...]]). [Default is null]
- 	 *			where = Restrict returned items to specified field values. The fields must be intrinsic and in the related table. This option can be useful when you want to efficiently fetch specific rows from a related table. Note that multiple fields/values are logically AND'ed together – all must match for a row to be returned - and that only equivalence is supported. [Default is null]			
+ 	 *			where = Restrict returned items to specified field values. The fields must be intrinsic and in the related table. This option can be useful when you want to efficiently fetch specific rows from a related table. Note that multiple fields/values are logically AND'ed together - all must match for a row to be returned - and that only equivalence is supported. [Default is null]			
  	 *			criteria = Restrict returned items using SQL criteria appended directly onto the query. Criteria is used as-is and must be compatible with the generated SQL query. [Default is null]
  	 *			showCurrentOnly = Returns the relationship with the latest effective date for the row_id that is not greater than the current date. This option is only supported for standard many-many self and non-self relations and is ignored for all other kinds of relationships. [Default is false]
  	 *			currentOnly = Synonym for showCurrentOnly
@@ -6424,6 +6662,13 @@ if (!$batch) {
 		}
 		if (($options['excludeRelationshipTypes'] = caGetOption(array('excludeRelationshipTypes', 'exclude_relationship_types', 'excludeRelationshipType', 'exclude_relationship_type'), $options, null)) && !is_array($options['excludeRelationshipTypes'])) {
 			$options['excludeRelationshipTypes'] = preg_split("![;,]{1}!", $options['excludeRelationshipTypes']);
+		}
+		if (($options['restrictToSources'] = caGetOption('restrictToSources', $options, null)) && !is_array($options['restrictToSources'])) {
+			$options['restrictToSources'] = preg_split("![;,]{1}!", $options['restrictToSources']);
+		}
+		
+		if(caACLIsEnabled($this, ['forPawtucket' => true])) { 
+			$pa_options['checkAccess'] = null; 
 		}
 		
 		if (!isset($options['dontIncludeSubtypesInTypeRestriction']) && (isset($options['dont_include_subtypes_in_type_restriction']) && $options['dont_include_subtypes_in_type_restriction'])) { $options['dontIncludeSubtypesInTypeRestriction'] = $options['dont_include_subtypes_in_type_restriction']; }
@@ -7132,13 +7377,26 @@ if (!$batch) {
 						}   
 					}
                     
-                    if(is_array($options['restrictToTypes']) && sizeof($options['restrictToTypes'])) {
+                    if(
+                    	(is_array($options['restrictToTypes']) && sizeof($options['restrictToTypes']))
+                    	||
+                    	(is_array($options['restrictToSources']) && sizeof($options['restrictToSources']))
+                    ) {
                         foreach($va_rels as $vs_rel_pk => $va_rel_info) {
                             if (!in_array($va_rel_info['one_table'], [$this->tableName()])) {
-                                $va_type_ids = caMakeTypeIDList($va_rel_info['one_table'], $options['restrictToTypes']);
+                                $va_type_ids = (is_array($options['restrictToTypes']) && sizeof($options['restrictToTypes'])) ? caMakeTypeIDList($va_rel_info['one_table'], $options['restrictToTypes']) : null;
+                                $source_ids = (is_array($options['restrictToSources']) && sizeof($options['restrictToSources'])) ? caMakeSourceIDList($va_rel_info['one_table'], $options['restrictToSources']) : null;
                     
+                    			$set = false;
                                 if (is_array($va_type_ids) && sizeof($va_type_ids)) { 
                                     $va_wheres[] = "(r.type_id IN (".join(",", $va_type_ids)."))";
+                                    $set = true;
+                                }
+                                if(is_array($source_ids) && sizeof($source_ids)) {
+                                	$va_wheres[] = "(r.source_id IN (".join(",", $source_ids)."))";
+                                    $set = true;
+                                }
+                                if($set) {
                                     $va_joins[] = "INNER JOIN {$va_rel_info['one_table']} AS r ON r.{$va_rel_info['one_table_field']} = {$vs_related_table_name}.".($vs_rel_pk ?? $t_rel_item->primaryKey()).$deleted_filter;
                                 }
                                 break;
@@ -7223,8 +7481,10 @@ if (!$batch) {
 				}
 			}
 			
+			$count_fld = $t_item_rel ? 'DISTINCT '.$t_item_rel->primaryKey(true) : '*';
+			
 			$vs_sql = "
-				SELECT ".(($ps_return_as === 'count') ? 'count(*) c' : "DISTINCT ".join(', ', $va_selects))."
+				SELECT ".(($ps_return_as === 'count') ? "count({$count_fld}) c" : "DISTINCT ".join(', ', $va_selects))."
 				FROM {$vs_subject_table_name}
 				".join("\n", array_merge($va_joins, $va_joins_post_add))."
 				WHERE
@@ -7533,8 +7793,8 @@ if (!$batch) {
 			
 			$parent_idno_is_set = false;
 			if (($this->tableName() == 'ca_objects') && $this->getAppConfig()->get('ca_objects_x_collections_hierarchy_enabled') && !$this->getAppConfig()->get('ca_objects_x_collections_hierarchy_disable_object_collection_idno_inheritance') && $pa_options['request']) {
-				if(!($vn_collection_id = $pa_options['request']->getParameter('collection_id', pInteger)) && ($obj_coll_rel_type = $this->getAppConfig()->get('ca_objects_x_collections_hierarchy_relationship_type'))) {
-					if(is_array($coll_ids = $this->get('ca_collections.collection_id', ['restrictToRelationshipTypes' => $obj_coll_rel_type, 'returnAsArray' => true]))) {
+				if(!($vn_collection_id = $pa_options['request']->getParameter('collection_id', pInteger)) && ($obj_coll_rel_types = caGetObjectCollectionHierarchyRelationshipTypes())) {
+					if(is_array($coll_ids = $this->get('ca_collections.collection_id', ['restrictToRelationshipTypes' => $obj_coll_rel_types, 'returnAsArray' => true]))) {
 						$vn_collection_id = array_shift($coll_ids);
 					}
 				}
@@ -7731,6 +7991,7 @@ $pa_options["display_form_field_tips"] = true;
 	 *		primaryTable = When search result is for a relationship, the related table to consider as context. Paths to related tables will be generated as if they were relative to the primary. Mostly useful when sorting on related records from a relationship, to ensure that the path to the sort record is. [Default is null]
 	 *		start = Zero-based index to begin returned items at. [Default is 0]
  	 *		limit = Maximum number of items to return. [Default is null; no limit]
+ 	 *		dontFilterByACL = do not filter results using item-level access control, if when enabled. [Default is false]
 	 * @return SearchResult A search result of for the specified table
 	 */
 	public function makeSearchResult($pm_rel_table_name_or_num, $pa_ids, $pa_options=null) {
@@ -7745,6 +8006,13 @@ $pa_options["display_form_field_tips"] = true;
 				$va_ids[$vn_k] = $vn_id;
 			}
 		}
+		
+		if(!caGetOption('dontfilterByACL', $pa_options, false) && caACLIsEnabled($pm_rel_table_name_or_num)) {
+			global $AUTH_CURRENT_USER_ID;
+			$s = new ObjectSearch();
+			$va_ids = $s->filterHitsByACL($va_ids, $t_instance->tableNum(), $AUTH_CURRENT_USER_ID, __CA_ACL_READONLY_ACCESS__);
+		}
+		
 		// sort?
 		if ($pa_sort = caGetOption('sort', $pa_options, null)) {
 			if (!is_array($pa_sort)) { $pa_sort = [$pa_sort]; }
@@ -7808,21 +8076,303 @@ $pa_options["display_form_field_tips"] = true;
 	 * 
 	 */
 	public function getACLUserHTMLFormBundle($po_request, $ps_form_name, $pa_options=null) {
-		require_once(__CA_MODELS_DIR__.'/ca_acl.php');
-		
 		$vs_view_path = (isset($pa_options['viewPath']) && $pa_options['viewPath']) ? $pa_options['viewPath'] : $po_request->getViewsDirectoryPath();
 		$o_view = new View($po_request, "{$vs_view_path}/bundles/");
 		
 		$t_user = new ca_users();
+		$config = $t_user->getAppConfig();
 		
 		$o_view->setVar('t_instance', $this);
 		$o_view->setVar('table_num', $this->tableNum());
 		$o_view->setVar('id_prefix', $ps_form_name);		
 		$o_view->setVar('request', $po_request);	
 		$o_view->setVar('t_user', $t_user);
-		$o_view->setVar('initialValues', $this->getACLUsers(array('returnAsInitialValuesForBundle' => true)));
+		$o_view->setVar('initialValues', $this->getACLUsers(['returnAsInitialValuesForBundle' => true]));
+		
+		$o_view->setVar('allow_rep_access_inheritance', $allow_rep_access_inheritance = $config->get('ca_object_representations_allow_access_inheritance'));	
+		$o_view->setVar('show_rep_access_inheritance_controls', $allow_rep_access_inheritance && in_array($this->tableName(), ['ca_collections', 'ca_objects']));
+		
+		$o_view->setVar('pawtucket_only_acl_separate_inheritance_controls', ($config->get('pawtucket_only_acl_separate_inheritance_controls') || $config->get("{tablename}_pawtucket_only_acl_separate_inheritance_controls")));
+		
+		$o_view->setVar('show_public_access_controls', ($config->get('acl_show_public_access_controls') || $config->get("{$tablename}_acl_show_public_access_controls")));
+		$o_view->setVar('show_public_access_counts', ($config->get('acl_show_public_access_counts') || $config->get("{$tablename}_acl_show_public_access_counts")));
+		
+		$o_view->setVar('acl_enabled', caACLIsEnabled($this));
+		$o_view->setVar('pawtucket_only_acl_enabled', caACLIsEnabled($this, ['forPawtucket' => true]));
 		
 		return $o_view->render('ca_acl_users.php');
+	}
+	# --------------------------------------------------------------------------------------------		
+	/**
+	 * 
+	 */
+	public function getACLBatchUserHTMLFormBundle(RequestHTTP $request, string $form_name, array $users, ?array $options=null) {
+		$vs_view_path = (isset($options['viewPath']) && $options['viewPath']) ? $options['viewPath'] : $request->getViewsDirectoryPath();
+		$o_view = new View($request, "{$vs_view_path}/bundles/");
+		
+		$t_user = new ca_users();
+		$config = $t_user->getAppConfig();
+		
+		$o_view->setVar('t_instance', $this);
+		$o_view->setVar('table_num', $this->tableNum());
+		$o_view->setVar('id_prefix', $form_name);		
+		$o_view->setVar('request', $request);	
+		$o_view->setVar('t_user', $t_user);
+		$o_view->setVar('initialValues', $users);
+		
+		$o_view->setVar('allow_rep_access_inheritance', $allow_rep_access_inheritance = $config->get('ca_object_representations_allow_access_inheritance'));	
+		$o_view->setVar('show_rep_access_inheritance_controls', $allow_rep_access_inheritance && in_array($this->tableName(), ['ca_collections', 'ca_objects']));
+		
+		$o_view->setVar('pawtucket_only_acl_separate_inheritance_controls', ($config->get('pawtucket_only_acl_separate_inheritance_controls') || $config->get("{tablename}_pawtucket_only_acl_separate_inheritance_controls")));
+		$o_view->setVar('show_public_access_controls', ($config->get('acl_show_public_access_controls') || $config->get("{$tablename}_acl_show_public_access_controls")));
+		$o_view->setVar('show_public_access_counts', ($config->get('acl_show_public_access_counts') || $config->get("{$tablename}_acl_show_public_access_counts")));
+		
+		$o_view->setVar('acl_enabled', caACLIsEnabled($this));
+		$o_view->setVar('pawtucket_only_acl_enabled', caACLIsEnabled($this, ['forPawtucket' => true]));
+		
+		return $o_view->render('ca_acl_batch_users.php');
+	}
+	# --------------------------------------------------------------------------------------------	
+	/**
+	 *
+	 */
+	public function setACLAccessFromForm(RequestHTTP $request, ?array $options=null) : ?bool {
+		if ((!$this->isSaveable($request)) || (!$request->user->canDoAction('can_change_acl_'.$this->tableName()))) {
+			$this->postError(2570, _t('Cannot set access'), 'BundleableLabelableBaseModelWithAttributes->setACLAccessFromForm()');
+			return false;
+		}
+		$is_batch = caGetOption('batch', $options, false);
+		$save_access = $this->getAppConfig()->get('acl_show_public_access_controls');
+		
+		$pawtucket_only_acl_enabled = caACLIsEnabled($this, ['forPawtucket' => true]);
+		$pawtucket_only_acl_separate_inheritance_controls = ($this->getAppConfig()->get('pawtucket_only_acl_separate_inheritance_controls') || $this->getAppConfig()->get("{tablename}_pawtucket_only_acl_separate_inheritance_controls"));
+		$pawtucket_only_dont_link_acl_and_access_inheritance = ($this->getAppConfig()->get('pawtucket_only_dont_link_acl_and_access_inheritance') || $this->getAppConfig()->get("{tablename}_pawtucket_only_dont_link_acl_and_access_inheritance"));
+
+		$can_save_acl = ((!method_exists($this, 'supportsACL') || $this->supportsACL())) || $pawtucket_only_acl_enabled;
+	
+		$subject_table = $this->tableName();
+		$subject_pk = $this->primaryKey();
+		$form_prefix = $request->getParameter('_formName', pString);
+
+		$this->opo_app_plugin_manager->hookBeforeSaveItem([
+			'id' => $this->getPrimaryKey(),
+			'table_num' => $this->tableNum(),
+			'table_name' => $subject_table, 
+			'instance' => &$this,
+			'is_insert' => false
+		]);
+		
+		// Set Pawtucket access
+		$orig_access = $this->get('access');
+		if($save_access && !is_null($request->parameterExists('access')) && $this->hasField('access')) {
+			$this->set('access', $request->getParameter('access', pInteger) );
+			$this->update(['skipACLInheritance' => true]);
+		}
+		
+		// Set all/none parameters from batch-inheritance-set <select>'s
+		$set = $request->getParameter('set_access_inherit_from_parent', pString);
+		$request->setParameter('set_all_access_inherit_from_parent', ($set == 'set_all_access_inherit_from_parent') ? 1 : 0);
+		$request->setParameter('set_none_access_inherit_from_parent', ($set == 'set_none_access_inherit_from_parent') ? 1 : 0);
+		
+		$set = $request->getParameter('set_objects_access_inherit_from_parent', pString);
+		$request->setParameter('set_all_objects_access_inherit_from_parent', ($set == 'set_all_objects_access_inherit_from_parent') ? 1 : 0);
+		$request->setParameter('set_none_objects_access_inherit_from_parent', ($set == 'set_none_objects_access_inherit_from_parent') ? 1 : 0);
+		
+		$set = $request->getParameter('set_acl_inherit_from_parent', pString);
+		$request->setParameter('set_all_acl_inherit_from_parent', ($set == 'set_all_acl_inherit_from_parent') ? 1 : 0);
+		$request->setParameter('set_none_acl_inherit_from_parent', ($set == 'set_none_acl_inherit_from_parent') ? 1 : 0);
+		
+		$set = $request->getParameter('set_acl_inherit_from_ca_collections', pString);
+		$request->setParameter('set_all_acl_inherit_from_ca_collections', ($set == 'set_all_acl_inherit_from_ca_collections') ? 1 : 0);
+		$request->setParameter('set_none_acl_inherit_from_ca_collections', ($set == 'set_none_acl_inherit_from_ca_collections') ? 1 : 0);
+		
+		
+		$set_rep_access = $request->getParameter('set_representation_access_inherit_from_parent', pInteger);
+		$set_rep_acl = $request->getParameter('set_representation_acl_inherit_from_parent', pInteger);
+		if($pawtucket_only_acl_enabled && !$pawtucket_only_acl_separate_inheritance_controls && !$pawtucket_only_dont_link_acl_and_access_inheritance) {
+			$set_all = $request->getParameter('set_all_access_inherit_from_parent', pInteger);
+			$request->setParameter('set_all_acl_inherit_from_parent', $set_all);
+			
+			$set_all = $request->getParameter('set_all_objects_access_inherit_from_parent', pInteger);
+			$request->setParameter('set_all_acl_inherit_from_ca_collections', $set_all);
+			
+			$set_none = $request->getParameter('set_none_access_inherit_from_parent', pInteger);
+			$request->setParameter('set_none_acl_inherit_from_parent', $set_none);
+			
+			$set_none = $request->getParameter('set_none_objects_access_inherit_from_parent', pInteger);
+			$request->setParameter('set_none_acl_inherit_from_ca_collections', $set_none);
+			
+			$inherit = $request->getParameter('access_inherit_from_parent', pInteger);
+			$request->setParameter('acl_inherit_from_ca_collections', $inherit);
+			$request->setParameter('acl_inherit_from_parent', $inherit);
+			
+			$request->setParameter('set_representation_acl_inherit_from_parent', $set_rep_access);	
+			$set_rep_acl = $set_rep_access;
+		}
+	
+		if($can_save_acl) {
+			// Force all?
+			if(($set_all = $request->getParameter('set_all_acl_inherit_from_parent', pInteger)) || ($set_none = $request->getParameter('set_none_acl_inherit_from_parent', pInteger))) {
+				if(!ca_acl::setACLInheritanceSettingForAllChildRows($this, $this->getPrimaryKey(), $set_all, ['setForObjectRepresentations' => $set_rep_acl])) {
+					$this->postError(1250, _t('Could not set ACL inheritance settings on child items'),"BundleableLabelableBaseModelWithAttributes->setACLAccessFromForm()");
+				}
+				$_REQUEST['form_timestamp'] = time();
+			}
+			if(
+				($subject_table === 'ca_collections')
+				&&
+				($set_all = $request->getParameter('set_all_acl_inherit_from_ca_collections', pInteger)) || ($set_none = $request->getParameter('set_none_acl_inherit_from_ca_collections', pInteger))
+			) {
+				if(!ca_acl::setACLInheritanceSettingForRelatedObjects($this, $this->getPrimaryKey(), $set_all, ['setForObjectRepresentations' => $set_rep_acl])) {
+					$this->postError(1250, _t('Could not set ACL inheritance settings on related objects'),"BundleableLabelableBaseModelWithAttributes->setACLAccessFromForm()");
+				}
+				$_REQUEST['form_timestamp'] = time();
+			}
+		}
+		if(
+			($set_all = $request->getParameter('set_all_access_inherit_from_parent', pInteger)) || ($set_none = $request->getParameter('set_none_access_inherit_from_parent', pInteger))
+		) {
+			if(!ca_acl::setAccessInheritanceSettingForChildrenFromRow($this, $this->getPrimaryKey(), $set_all, ['setForObjectRepresentations' => $set_rep_access])) {
+				$this->postError(1250, _t('Could not set public access inheritance settings on related objects'),"BundleableLabelableBaseModelWithAttributes->setACLAccessFromForm()");
+			}
+			$_REQUEST['form_timestamp'] = time();
+		}
+		if(
+			($subject_table === 'ca_collections')
+			&&
+			($set_all = $request->getParameter('set_all_objects_access_inherit_from_parent', pInteger)) || ($set_none = $request->getParameter('set_none_objects_access_inherit_from_parent', pInteger))
+		) {
+			if(!ca_acl::setAccessInheritanceSettingToRelatedObjectsFromCollection($this, $this->getPrimaryKey(), $set_all, ['setForObjectRepresentations' => $set_rep_access])) {
+				$this->postError(1250, _t('Could not set public access inheritance settings on related objects'),"BundleableLabelableBaseModelWithAttributes->setACLAccessFromForm()");
+			}
+			$_REQUEST['form_timestamp'] = time();
+		}
+		// Set ACL-related intrinsic fields
+		if ($this->hasField('acl_inherit_from_ca_collections') || $this->hasField('acl_inherit_from_parent') || $this->hasField('access_inherit_from_parent')) {
+			if($can_save_acl) {
+				if ($this->hasField('acl_inherit_from_ca_collections')) {
+					$this->set('acl_inherit_from_ca_collections', $request->getParameter('acl_inherit_from_ca_collections', pInteger));
+				}
+				if ($this->hasField('acl_inherit_from_parent')) {
+					$this->set('acl_inherit_from_parent', $request->getParameter('acl_inherit_from_parent', pInteger));
+				}
+			}
+			if ($this->hasField('access_inherit_from_parent')) {
+				$this->set('access_inherit_from_parent', $request->getParameter('access_inherit_from_parent', pInteger));
+			}
+			$this->update(['skipACLInheritance' => true]);
+
+			//if ($this->numErrors()) {
+			//	$this->postError(1250, _t('Could not set ACL inheritance settings: %1', join("; ", $this->getErrors())),"BundleableLabelableBaseModelWithAttributes->setACLAccessFromForm()");
+			//}
+		}
+		if($can_save_acl) {
+			$preserve_inherited = [];
+			if($this->hasField('acl_inherit_from_ca_collections') && $this->get('acl_inherit_from_ca_collections')) { $preserve_inherited[] = 13; }
+			if($this->get('acl_inherit_from_parent')) { $preserve_inherited[] = $this->tableNum(); }
+	
+			// Save user ACL's
+			$users_to_set = $users_to_remove =  [];
+			foreach($_REQUEST as $key => $val) {
+				if (preg_match("!^{$form_prefix}_user_id(.*)$!", $key, $matches)) {
+					$user_id = (int)$request->getParameter($form_prefix.'_user_id'.$matches[1], pInteger);
+					$access = $request->getParameter($form_prefix.'_user_access_'.$matches[1], pInteger);
+					$include_representations = $request->getParameter($form_prefix.'_user_include_representations_'.$matches[1], pInteger);
+					$action = $is_batch ? $request->getParameter($form_prefix.'_user_action_'.$matches[1], pString) : null;
+					
+					if($is_batch) {
+						if($action === 'ADD') {
+							$users_to_set[$user_id] = [
+								'access' => $access,
+								'include_representations' => $include_representations
+							];
+						} elseif($action === 'REMOVE') {
+							$users_to_remove[] = $user_id;
+						}
+					} else {
+						if ($access >= 0) {
+							$users_to_set[$user_id] = [
+								'access' => $access,
+								'include_representations' => $include_representations
+							];
+						}
+					}
+				}
+			}
+			if($is_batch) {
+				if(sizeof($users_to_set)) { $this->addACLUsers($users_to_set); }
+				if(sizeof($users_to_remove)) { $this->removeACLUsers($users_to_remove); }
+			} else {
+				$this->setACLUsers($users_to_set, ['preserveInherited' => $preserve_inherited]);
+			}
+	
+			// Save group ACL's
+			$groups_to_set = $groups_to_remove = [];
+			foreach($_REQUEST as $key => $val) {
+				if (preg_match("!^{$form_prefix}_group_id(.*)$!", $key, $matches)) {
+					$group_id = (int)$request->getParameter($form_prefix.'_group_id'.$matches[1], pInteger);
+					$access = $request->getParameter($form_prefix.'_group_access_'.$matches[1], pInteger);
+					$include_representations = $request->getParameter($form_prefix.'_group_include_representations_'.$matches[1], pInteger);
+					$action = $is_batch ? $request->getParameter($form_prefix.'_group_action_'.$matches[1], pString) : null;
+					
+					if($is_batch) {
+						if($action === 'ADD') {
+							$groups_to_set[$group_id] = [
+								'access' => $access,
+								'include_representations' => $include_representations
+							];
+						} elseif($action === 'REMOVE') {
+							$groups_to_remove[] = $group_id;
+						}
+					} else {
+						if ($access >= 0) {
+							$groups_to_set[$group_id] = [
+								'access' => $access,
+								'include_representations' => $include_representations
+							];
+						}
+					}
+				}
+			}
+			if($is_batch) {
+				if(sizeof($groups_to_set)) { $this->addACLUserGroups($groups_to_set); }
+				if(sizeof($groups_to_remove)) { $this->removeACLUserGroups($groups_to_remove); }
+			} else {
+				$this->setACLUserGroups($groups_to_set, ['preserveInherited' => $preserve_inherited]);
+			}
+	
+			// Save "world" ACL
+			if($pawtucket_only_acl_enabled) {
+				// Set world access to public access value in "front-end only" mode
+				$a = $request->getParameter('access', pInteger) ?? 0;
+				$access_to_acl_map = caGetACLItemLevelMap();
+				$this->setACLWorldAccess($access_to_acl_map[$a] ?? 0, ['preserveInherited' => $preserve_inherited]);
+			} else {
+				$this->setACLWorldAccess($request->getParameter("{$form_prefix}_access_world", pInteger));
+			}
+			
+			ca_acl::updateACLInheritanceForRow($this);
+		}
+		
+		SearchResult::clearCaches();
+		ca_acl::applyAccessInheritance($this);
+		SearchResult::clearCaches();
+		ca_acl::applyAccessInheritanceToChildrenFromRow($this);
+		SearchResult::clearCaches();
+		if($this->tableName() === 'ca_collections') {
+			ca_acl::applyAccessInheritanceToRelatedObjectsFromCollection($this);
+		}
+		$this->opo_app_plugin_manager->hookSaveItem(
+			[
+				'id' => $this->getPrimaryKey(),
+				'table_num' => $this->tableNum(),
+				'table_name' => $subject_table,
+				'instance' => &$this,
+				'is_insert' => false,
+				'request' => $request
+			]
+		);
+		return true;
 	}
 	# --------------------------------------------------------------------------------------------	
 	/**
@@ -7840,6 +8390,7 @@ $pa_options["display_form_field_tips"] = true;
 	 * @return array List of user-base ACL entries associated with the currently loaded row
 	 */ 
 	public function getACLUsers(?array $options=null) {
+		global $g_request;
 		if (!($vn_id = (int)$this->getPrimaryKey())) { return null; }
 		
 		if (!is_array($options)) { $options = []; }
@@ -7855,18 +8406,20 @@ $pa_options["display_form_field_tips"] = true;
 				acl.table_num = ? AND acl.row_id = ? AND acl.user_id IS NOT NULL
 		", $this->tableNum(), $vn_id);
 		
-		$inherited_from = $qr_res->getAllFieldValues(["inherited_from_table_num", "inherited_from_row_id"]);
-		$inherited_from_by_table = [];
-		foreach($inherited_from['inherited_from_table_num'] as $i => $table_num) {
-			if(!$inherited_from['inherited_from_row_id'][$i]) { continue; }
-			$inherited_from_by_table[$table_num][] = $inherited_from['inherited_from_row_id'][$i];
+		$acc = [];
+		while($qr_res->nextRow()) {
+			if($table_num = $qr_res->get('inherited_from_table_num')) {
+				$acc[$table_num][$qr_res->get('inherited_from_row_id')] = true;
+			}
 		}
 		
-		$inheritance_names = [];
-		foreach($inherited_from_by_table as $table_num => $row_ids) {
-			if(!is_array($row_ids) || !sizeof($row_ids)) { continue; }
-			$t_inherit = Datamodel::getInstance($table_num, true);
-			$inheritance_names[$table_num] = $t_inherit->getPreferredDisplayLabelsForIDs($row_ids);
+		foreach($acc as $table_num => $ids) {
+			if(!($t_instance = Datamodel::getInstance($table_num, true))) { continue; }
+			$ids = array_keys($ids);
+			
+			$labels = $t_instance->getPreferredDisplayLabelsForIDs($ids);
+			$identifiers = $t_instance->getFieldValuesForIDs($ids, ['idno']);
+			$acc[$table_num] = ['ids' => $ids, 'labels' => $labels, 'idno' => $identifiers, 'table' => $t_instance->tableName()];
 		}
 		
 		$va_users = [];
@@ -7895,6 +8448,17 @@ $pa_options["display_form_field_tips"] = true;
 				$va_row['label'] = $va_initial_values[$va_row['user_id']]['label'];
 				$va_row['id'] = $va_row['user_id'];
 				$va_row['access_display'] = $t_acl->getChoiceListValue('access', $va_row['access']);
+				
+				$label = $acc[$va_row['inherited_from_table_num']]['labels'][$va_row['inherited_from_row_id']] ?? null;
+				$idno = $acc[$va_row['inherited_from_table_num']]['idno'][$va_row['inherited_from_row_id']] ?? null;
+				
+				$va_row['inheritance_display'] = $label ? 
+					_t('Inherited from %1 (%2)', $label, $idno)
+					:
+					null;
+				$va_row['inheritance_link'] = ($va_row['inheritance_display'] && $g_request) ? _t('Inherited from %1 (%2)', caEditorLink($g_request, $label, '', $va_row['inherited_from_table_num'], $va_row['inherited_from_row_id']), $idno) : null;
+				$va_row['include_representations'] = $qr_res->get('include_representations');
+				
 				$va_users[(int)$qr_res->get('acl_id')] = $va_row;
 			} else {
 				$va_users[(int)$qr_res->get('user_id')] = $va_row;
@@ -7913,7 +8477,6 @@ $pa_options["display_form_field_tips"] = true;
 		
 		$t_acl = new ca_acl();
 		$t_acl->setTransaction($this->getTransaction());
-		
 		foreach($user_ids as $user_id => $access) {
 			$t_acl->clear();
 			$t_acl->load(['user_id' => $user_id, 'table_num' => $table_num, 'row_id' => $id]);		// try to load existing record
@@ -7921,6 +8484,12 @@ $pa_options["display_form_field_tips"] = true;
 			$t_acl->set('table_num', $table_num);
 			$t_acl->set('row_id', $id);
 			$t_acl->set('user_id', $user_id);
+			
+			$include_representations = null;
+			if(is_array($access)) {
+				$include_representations = $access['include_representations'] ?? 0;
+				$access = $access['access'] ?? 0;
+			}
 		
 			if($access != $t_acl->get('access')) {
 				$t_acl->set('inherited_from_table_num', null);
@@ -7928,6 +8497,7 @@ $pa_options["display_form_field_tips"] = true;
 			}
 			
 			$t_acl->set('access', $access);
+			if(!is_null($include_representations)) { $t_acl->set('include_representations', $include_representations); }
 			
 			if ($t_acl->getPrimaryKey()) {
 				$t_acl->update();
@@ -7950,7 +8520,7 @@ $pa_options["display_form_field_tips"] = true;
 	public function setACLUsers(array $user_ids, ?array $options=null) : ?bool {
 		$this->removeAllACLUsers($options);
 		if (!$this->addACLUsers($user_ids)) { return false; }
-		
+		ca_acl::clearAccessValueCache();
 		return true;
 	}
 	# ------------------------------------------------------------------
@@ -7963,7 +8533,10 @@ $pa_options["display_form_field_tips"] = true;
 		if (!($id = (int)$this->getPrimaryKey())) { return null; }
 		$table_num = $this->tableNum();
 		
+		ca_acl::clearAccessValueCache();
+		
 		$preserve_inherited_acl = caGetOption('preserveInherited', $options, false);
+		if(!is_array($preserve_inherited_acl)) { $preserve_inherited_acl = []; }
 		
 		$current_users = $this->getACLUsers();
 		
@@ -7973,8 +8546,8 @@ $pa_options["display_form_field_tips"] = true;
 		foreach($user_ids as $user_id) {
 			if (!isset($current_users[$user_id]) && $current_users[$user_id]) { continue; }
 			$params = ['table_num' => $table_num, 'row_id' => $id, 'user_id' => $user_id];
-			if($preserve_inherited_acl) { 
-				$params['inherited_from_table_num'] = null;
+			if(is_array($preserve_inherited_acl) && sizeof($preserve_inherited_acl)) { 
+				$params['inherited_from_table_num'] = ['not in', $preserve_inherited_acl];
 			}
 			$entries = ca_acl::find($params, ['returnAs' => 'modelInstances']);
 			if (is_array($entries)) {
@@ -8003,19 +8576,26 @@ $pa_options["display_form_field_tips"] = true;
 	public function removeAllACLUsers(?array $options=null) {
 		if (!($vn_id = (int)$this->getPrimaryKey())) { return null; }
 		
+		ca_acl::clearAccessValueCache();
+		
 		$o_db = $this->getDb();
 		
 		$preserve_inherited_acl = caGetOption('preserveInherited', $options, false);
+		if(!is_array($preserve_inherited_acl)) { $preserve_inherited_acl = []; }
 		
-		$preserve_inherited_acl_sql = $preserve_inherited_acl ? "
-			AND inherited_from_table_num IS NULL
-		" : '';
+		$params = [$this->tableNum(), $vn_id];
+		
+		$preserve_inherited_acl_sql = '';
+		if((is_array($preserve_inherited_acl) && sizeof($preserve_inherited_acl))) {
+			$preserve_inherited_acl_sql = " AND (inherited_from_table_num NOT IN (?) OR inherited_from_table_num IS NULL)";
+			$params[] = $preserve_inherited_acl;
+		}
 		
 		$qr_res = $o_db->query($sql ="
 			DELETE FROM ca_acl
 			WHERE
 				table_num = ? AND row_id = ? AND user_id IS NOT NULL {$preserve_inherited_acl_sql}
-		", [$this->tableNum(), $vn_id]);
+		", $params);
 		if ($o_db->numErrors()) {
 			$this->errors = $o_db->errors;
 			return false;
@@ -8031,15 +8611,56 @@ $pa_options["display_form_field_tips"] = true;
 		$o_view = new View($po_request, "{$vs_view_path}/bundles/");
 		
 		$t_group = new ca_user_groups();
+		$config = $t_group->getAppConfig();
 		
 		$o_view->setVar('t_instance', $this);
 		$o_view->setVar('table_num', $this->tableNum());
 		$o_view->setVar('id_prefix', $ps_form_name);		
 		$o_view->setVar('request', $po_request);	
 		$o_view->setVar('t_group', $t_group);
-		$o_view->setVar('initialValues', $this->getACLUserGroups(array('returnAsInitialValuesForBundle' => true)));
+		$o_view->setVar('initialValues', $this->getACLUserGroups(['returnAsInitialValuesForBundle' => true]));
+		
+		$o_view->setVar('allow_rep_access_inheritance', $allow_rep_access_inheritance = $config->get('ca_object_representations_allow_access_inheritance'));	
+		$o_view->setVar('show_rep_access_inheritance_controls', $allow_rep_access_inheritance && in_array($this->tableName(), ['ca_collections', 'ca_objects']));
+		
+		$o_view->setVar('pawtucket_only_acl_separate_inheritance_controls', ($config->get('pawtucket_only_acl_separate_inheritance_controls') || $config->get("{tablename}_pawtucket_only_acl_separate_inheritance_controls")));
+		$o_view->setVar('show_public_access_controls', ($config->get('acl_show_public_access_controls') || $config->get("{$tablename}_acl_show_public_access_controls")));
+		$o_view->setVar('show_public_access_counts', ($config->get('acl_show_public_access_counts') || $config->get("{$tablename}_acl_show_public_access_counts")));
+		
+		$o_view->setVar('acl_enabled', caACLIsEnabled($this));
+		$o_view->setVar('pawtucket_only_acl_enabled', caACLIsEnabled($this, ['forPawtucket' => true]));
 		
 		return $o_view->render('ca_acl_user_groups.php');
+	}
+	# --------------------------------------------------------------------------------------------		
+	/**
+	 * 
+	 */
+	public function getACLBatchGroupHTMLFormBundle(RequestHTTP $request, string $form_name, array $groups, ?array $options=null) {
+		$view_path = (isset($options['viewPath']) && $options['viewPath']) ? $options['viewPath'] : $request->getViewsDirectoryPath();
+		$o_view = new View($request, "{$view_path}/bundles/");
+		
+		$t_group = new ca_user_groups();
+		$config = $t_group->getAppConfig();
+		
+		$o_view->setVar('t_instance', $this);
+		$o_view->setVar('table_num', $this->tableNum());
+		$o_view->setVar('id_prefix', $form_name);		
+		$o_view->setVar('request', $request);	
+		$o_view->setVar('t_group', $t_group);
+		$o_view->setVar('initialValues', $groups);
+		
+		$o_view->setVar('allow_rep_access_inheritance', $allow_rep_access_inheritance = $config->get('ca_object_representations_allow_access_inheritance'));	
+		$o_view->setVar('show_rep_access_inheritance_controls', $allow_rep_access_inheritance && in_array($this->tableName(), ['ca_collections', 'ca_objects']));
+		
+		$o_view->setVar('pawtucket_only_acl_separate_inheritance_controls', ($config->get('pawtucket_only_acl_separate_inheritance_controls') || $config->get("{tablename}_pawtucket_only_acl_separate_inheritance_controls")));
+		$o_view->setVar('show_public_access_controls', ($config->get('acl_show_public_access_controls') || $config->get("{$tablename}_acl_show_public_access_controls")));
+		$o_view->setVar('show_public_access_counts', ($config->get('acl_show_public_access_counts') || $config->get("{$tablename}_acl_show_public_access_counts")));
+		
+		$o_view->setVar('acl_enabled', caACLIsEnabled($this));
+		$o_view->setVar('pawtucket_only_acl_enabled', caACLIsEnabled($this, ['forPawtucket' => true]));
+		
+		return $o_view->render('ca_acl_batch_user_groups.php');
 	}
 	# ------------------------------------------------------------------
 	/**
@@ -8056,6 +8677,7 @@ $pa_options["display_form_field_tips"] = true;
 	 * @return array List of user group ACL-entries associated with the currently loaded row
 	 */ 
 	public function getACLUserGroups(?array $options=null) {
+		global $g_request;
 		if (!($vn_id = (int)$this->getPrimaryKey())) { return null; }
 		
 		if (!is_array($options)) { $options = []; }
@@ -8084,9 +8706,26 @@ $pa_options["display_form_field_tips"] = true;
 		$t_acl->setTransaction($this->getTransaction());
 		
 		$qr_res->seek(0);
+		$acc = [];
+		while($qr_res->nextRow()) {
+			if($table_num = $qr_res->get('inherited_from_table_num')) {
+				$acc[$table_num][$qr_res->get('inherited_from_row_id')] = true;
+			}
+		}
+		
+		foreach($acc as $table_num => $ids) {
+			if(!($t_instance = Datamodel::getInstance($table_num, true))) { continue; }
+			$ids = array_keys($ids);
+			
+			$labels = $t_instance->getPreferredDisplayLabelsForIDs($ids);
+			$identifiers = $t_instance->getFieldValuesForIDs($ids, ['idno']);
+			$acc[$table_num] = ['ids' => $ids, 'labels' => $labels, 'idno' => $identifiers, 'table' => $t_instance->tableName()];
+		}
+		
+		$qr_res->seek(0);
 		while($qr_res->nextRow()) {
 			$va_row = [];
-			foreach(array('group_id', 'name', 'code', 'description', 'access') as $vs_f) {
+			foreach(['group_id', 'name', 'code', 'description', 'access'] as $vs_f) {
 				$va_row[$vs_f] = $qr_res->get($vs_f);
 			}
 			
@@ -8097,6 +8736,16 @@ $pa_options["display_form_field_tips"] = true;
 				$va_row['label'] = $va_initial_values[$va_row['group_id']]['label'];
 				$va_row['id'] = $va_row['group_id'];
 				$va_row['access_display'] = $t_acl->getChoiceListValue('access', $va_row['access']);
+				
+				$label = $acc[$va_row['inherited_from_table_num']]['labels'][$va_row['inherited_from_row_id']] ?? null;
+				$idno = $acc[$va_row['inherited_from_table_num']]['idno'][$va_row['inherited_from_row_id']] ?? null;
+				
+				$va_row['inheritance_display'] = $label ? 
+					_t('Inherited from %1 (%2)', $label, $idno)
+					:
+					null;
+				$va_row['inheritance_link'] = ($va_row['inheritance_display'] && $g_request) ? _t('Inherited from %1 (%2)', caEditorLink($g_request, $label, '', $va_row['inherited_from_table_num'], $va_row['inherited_from_row_id']), $idno) : null;
+				$va_row['include_representations'] = $qr_res->get('include_representations');
 				
 				$va_groups[(int)$qr_res->get('acl_id')] = $va_row;
 			} else {
@@ -8116,6 +8765,8 @@ $pa_options["display_form_field_tips"] = true;
 	 */ 
 	public function addACLUserGroups(array $group_ids, ?array $options=null) {
 		if (!($id = (int)$this->getPrimaryKey())) { return null; }
+		
+		ca_acl::clearAccessValueCache();
 		
 		$table_num = $this->tableNum();
 		
@@ -8138,12 +8789,19 @@ $pa_options["display_form_field_tips"] = true;
 			$t_acl->set('row_id', $id);
 			$t_acl->set('group_id', $group_id);
 			
+			$include_representations = null;
+			if(is_array($access)) {
+				$include_representations = $access['include_representations'] ?? 0;
+				$access = $access['access'] ?? 0;
+			}
+			
 			if($access != $t_acl->get('access')) {
 				$t_acl->set('inherited_from_table_num', null);
 				$t_acl->set('inherited_from_row_id', null);
 			}
 			
 			$t_acl->set('access', $access);
+			if(!is_null($include_representations)) { $t_acl->set('include_representations', $include_representations); }
 			
 			if ($t_acl->getPrimaryKey()) {
 				$t_acl->update();
@@ -8177,14 +8835,18 @@ $pa_options["display_form_field_tips"] = true;
 	 * 
 	 *
 	 * @param array $options Options include:
-	 *		preserveInherited = Don't remove inherited ACL entries. [Default is false]
+	 *		preserveInherited = Don't remove inherited ACL entries from tables. [Default is false]
 	 */ 
 	public function removeACLUserGroups($group_ids, ?array $options=null) {
 		if (!($id = (int)$this->getPrimaryKey())) { return null; }
 		
+		ca_acl::clearAccessValueCache();
+		
 		$table_num = $this->tableNum();
 		
 		$preserve_inherited_acl = caGetOption('preserveInherited', $options, false);
+		if(!is_array($preserve_inherited_acl)) { $preserve_inherited_acl = []; }
+		
 		$current_groups = $this->getUserGroups();
 		
 		$t_acl = new ca_acl();
@@ -8194,8 +8856,8 @@ $pa_options["display_form_field_tips"] = true;
 			if (!isset($current_groups[$group_id]) && $current_groups[$group_id]) { continue; }
 			
 			$params = ['table_num' => $table_num, 'row_id' => $id, 'group_id' => $group_id];
-			if($preserve_inherited_acl) { 
-				$params['inherited_from_table_num'] = null;
+			if((is_array($preserve_inherited_acl) && sizeof($preserve_inherited_acl))) {
+				$params['inherited_from_table_num'] = ['not in', $preserve_inherited_acl];
 			}
 			$entries = ca_acl::find($params, ['returnAs' => 'modelInstances']);
 			if (is_array($entries)) {
@@ -8217,26 +8879,33 @@ $pa_options["display_form_field_tips"] = true;
 	 * Removes all user group-based ACL entries from currently loaded row
 	 *
 	 * @param array $options Options include:
-	 *		preserveInherited = Don't remove inherited ACL entries. [Default is false]
+	 *		preserveInherited = Don't remove inherited ACL entries from tables. [Default is false]
 	 *
 	 * @return bool True on success, false on failure
 	 */ 
 	public function removeAllACLUserGroups(?array $options=null) {
 		if (!($vn_id = (int)$this->getPrimaryKey())) { return null; }
 
+		ca_acl::clearAccessValueCache();
+		
 		$o_db = $this->getDb();
 				
 		$preserve_inherited_acl = caGetOption('preserveInherited', $options, false);
+		if(!is_array($preserve_inherited_acl)) { $preserve_inherited_acl = []; }
 		
-		$preserve_inherited_acl_sql = $preserve_inherited_acl ? "
-			AND inherited_from_table_num IS NULL
-		" : '';
+		$params = [$this->tableNum(), (int)$vn_id];
 		
-		$qr_res = $o_db->query("
+		$preserve_inherited_acl_sql = '';
+		if((is_array($preserve_inherited_acl) && sizeof($preserve_inherited_acl))) {
+			$preserve_inherited_acl_sql = " AND (inherited_from_table_num NOT IN (?) OR inherited_from_table_num IS NULL)";
+			$params[] = $preserve_inherited_acl;
+		}
+		
+		$qr_res = $o_db->query($z="
 			DELETE FROM ca_acl
 			WHERE
 				table_num = ? AND row_id = ? AND group_id IS NOT NULL {$preserve_inherited_acl_sql}
-		", [$this->tableNum(), (int)$vn_id]);
+		", $params);
 		
 		if ($o_db->numErrors()) {
 			$this->errors = $o_db->errors;
@@ -8319,34 +8988,8 @@ $pa_options["display_form_field_tips"] = true;
 	/**
 	 * 
 	 */
-	public function setACLWorldAccess($pn_world_access, ?array $options=null) {
-		if (!($vn_id = (int)$this->getPrimaryKey())) { return null; }
-		
-		$vn_table_num = $this->tableNum();
-		
-		$t_acl = new ca_acl();	
-		$t_acl->setTransaction($this->getTransaction());
-		
-		$t_acl->load(array('group_id' => null, 'user_id' => null, 'table_num' => $vn_table_num, 'row_id' => $vn_id));		// try to load existing record
-		
-		$t_acl->set('table_num', $vn_table_num);
-		$t_acl->set('row_id', $vn_id);
-		$t_acl->set('user_id', null);
-		$t_acl->set('group_id', null);
-		$t_acl->set('access', $pn_world_access);
-		
-		if ($t_acl->getPrimaryKey()) {
-			$t_acl->update();
-		} else {
-			$t_acl->insert();
-		}
-		
-		if ($t_acl->numErrors()) {
-			$this->errors = $t_acl->errors;
-			return false;
-		}
-		
-		return true;
+	public function setACLWorldAccess($world_access, ?array $options=null) {
+		return ca_acl::setACLWorldAccess($this, $world_access, $options);
 	}
 	# --------------------------------------------------------------------------------------------		
 	/**
@@ -8367,7 +9010,6 @@ $pa_options["display_form_field_tips"] = true;
 			$pn_id = (int)$this->getPrimaryKey(); 
 			if (!$pn_id) { return null; }
 		}
-		if ($t_user->canDoAction('is_administrator')) { return __CA_ACL_EDIT_DELETE_ACCESS__; }
 		
 		return ca_acl::accessForRow($t_user, $this->tableNum(), $pn_id);
 	}
@@ -8384,12 +9026,42 @@ $pa_options["display_form_field_tips"] = true;
 	/**
 	 * Checks if model supports ACL item-based access control
 	 *
+	 * @param array $options Array of options. Options include:
+	 *		useSettingsOnly = Return ACL enabled status based upon configuration settings only, ignoring __CA_DISABLE_ACL__ constant. [Default is false]
+	 *
 	 * @return bool True if model supports ACL, false if not
 	 */
-	public function supportsACL() {
-		if(defined('__CA_DISABLE_ACL__') && __CA_DISABLE_ACL__) { return false; }
-		if(property_exists($this,'disable_acl') && $this->disable_acl) { return false; }
-		if(!$this->getAppConfig()->get('perform_item_level_access_checking') || $this->getAppConfig()->get($this->tableName().'_dont_do_item_level_access_control')) { return false; }
+	public function supportsACL(?array $options=null) {
+		$force = caGetOption('force', $options, false);
+		$use_settings_only = caGetOption('useSettingsOnly', $options, false);
+		if(!$force && $use_settings_only && defined('__CA_DISABLE_ACL__') && __CA_DISABLE_ACL__) { return false; }
+		if(!$force && property_exists($this,'disable_acl') && $this->disable_acl) { return false; }
+		$type_code = $this->isLoaded() ? $this->getTypeCode() : null;
+		$supports_acl = true; 
+		$keys = ['perform_item_level_access_checking'];
+		$nkeys = [$this->tableName().'_dont_do_item_level_access_control'];
+		if($this->isLoaded()) {
+			array_unshift($keys, $this->tableName().'_perform_item_level_access_checking');
+			array_unshift($keys, $this->tableName().'_'.$this->getTypeCode().'_perform_item_level_access_checking');
+			array_unshift($nkeys, $this->tableName().'_'.$this->getTypeCode().'_dont_do_item_level_access_control');
+		}
+		
+		$config = $this->getAppConfig();
+		if(!$force) {
+			foreach($keys as $a) {
+				if($config->exists($a)) { 
+					$supports_acl = (bool)$config->get($a); 
+					break;
+				}
+			}
+		}
+		foreach($nkeys as $a) {
+			if($config->get($a)) { 
+				$supports_acl = false;
+				break;
+			}
+		}
+		if(!$supports_acl) { return false; }
 		return (bool)$this->getProperty('SUPPORTS_ACL');
 	}
 	# --------------------------------------------------------------------------------------------	
@@ -8400,9 +9072,9 @@ $pa_options["display_form_field_tips"] = true;
 	 * @return bool True if change succeeded, false if error
 	 */
 	public function changeType($pm_type) {
-		if (!$this->getPrimaryKey()) { return false; }					// row must be loaded
-		if (!method_exists($this, 'getTypeID')) { return false; }		// model must be type-able
-		
+		if(!$this->getPrimaryKey()) { return false; }					// row must be loaded
+		if(!method_exists($this, 'getTypeID')) { return false; }		// model must be type-able
+		if(!$pm_type && !$this->typeIDIsOptional()) { return false; }
 		unset($_REQUEST['form_timestamp']);
 		
 		if (!($vb_already_in_transaction = $this->inTransaction())) {
@@ -8484,8 +9156,8 @@ $pa_options["display_form_field_tips"] = true;
      * @param null $pn_rank
 side. For many self-relations the direction determines the nature and display text for the relationship.
 	 * @param array $pa_options Array of additional options:
-	 *		allowDuplicates = if set to true, attempts to add a relationship that already exists will succeed. Default is false – duplicate relationships will not be created
-	 *		setErrorOnDuplicate = if set to true, an error will be set if an attempt is made to add a duplicate relationship. Default is false – don't set error. addRelationship() will always return false when creation of a duplicate relationship fails, no matter how the setErrorOnDuplicate option is set.
+	 *		allowDuplicates = if set to true, attempts to add a relationship that already exists will succeed. Default is false - duplicate relationships will not be created
+	 *		setErrorOnDuplicate = if set to true, an error will be set if an attempt is made to add a duplicate relationship. Default is false - don't set error. addRelationship() will always return false when creation of a duplicate relationship fails, no matter how the setErrorOnDuplicate option is set.
 	 * @return bool|BaseRelationshipModel Loaded relationship model instance on success, false on error.
 	 */
 	public function addRelationship($pm_rel_table_name_or_num, $pn_rel_id, $pm_type_id=null, $ps_effective_date=null, $ps_source_info=null, $ps_direction=null, $pn_rank=null, $pa_options=null) {
@@ -8540,8 +9212,8 @@ side. For many self-relations the direction determines the nature and display te
 	 * @param string $ps_direction Optional direction specification for self-relationships (relationships linking two rows in the same table). Valid values are 'ltor' (left-to-right) and  'rtol' (right-to-left); the direction determines which "side" of the relationship the currently loaded row is on: 'ltor' puts the current row on the left side. For many self-relations the direction determines the nature and display text for the relationship.
 	 * @param null|int $pn_rank
 	 * @param array $pa_options Array of additional options:
-	 *		allowDuplicates = if set to true, attempts to edit a relationship to match one that already exists will succeed. Default is false – duplicate relationships will not be created.
-	 *		setErrorOnDuplicate = if set to true, an error will be set if an attempt is made to create a duplicate relationship. Default is false – don't set error. editRelationship() will always return false when editing of a relationship fails, no matter how the setErrorOnDuplicate option is set.
+	 *		allowDuplicates = if set to true, attempts to edit a relationship to match one that already exists will succeed. Default is false - duplicate relationships will not be created.
+	 *		setErrorOnDuplicate = if set to true, an error will be set if an attempt is made to create a duplicate relationship. Default is false - don't set error. editRelationship() will always return false when editing of a relationship fails, no matter how the setErrorOnDuplicate option is set.
 	 * @return BaseRelationshipModel Loaded relationship model instance on success, false on error.
 	 */
 	public function editRelationship($pm_rel_table_name_or_num, $pn_relation_id, $pn_rel_id, $pm_type_id=null, $ps_effective_date=null, $pa_source_info=null, $ps_direction=null, $pn_rank=null, $pa_options=null) {
@@ -9586,6 +10258,17 @@ side. For many self-relations the direction determines the nature and display te
 			$rel_tables = array_filter($rel_tables, function($v) use ($skip_relationships) { return !in_array($v, $skip_relationships); } );
 		}
 		return $rel_tables;
+	}
+	# -------------------------------------------------------
+	/**
+	 * 
+	 *
+	 * @param string $bundle
+	 * @return bool
+	 */
+	public function valueDidChange(string $bundle) : ?bool {
+		// TODO: handle changes on relationship?
+		return parent::valueDidChange($bundle);
 	}
 	# -------------------------------------------------------
 }
